@@ -1,12 +1,14 @@
-const {
-  Engine, Render, Runner, Bodies, Body, Composite, Events
-} = Matter;
+const { Engine, Render, Runner, Bodies, Body, Composite, Events } = Matter;
 
 const canvas = document.getElementById("c");
+const panelEl = document.getElementById("ui");
+
 const namesEl = document.getElementById("names");
 const buildBtn = document.getElementById("buildBtn");
 const startBtn = document.getElementById("startBtn");
 const resetBtn = document.getElementById("resetBtn");
+const shakeBtn = document.getElementById("shakeBtn");
+
 const staggerEl = document.getElementById("stagger");
 const followLeaderEl = document.getElementById("followLeader");
 const statusEl = document.getElementById("status");
@@ -14,14 +16,13 @@ const countdownEl = document.getElementById("countdown");
 const top5El = document.getElementById("top5");
 const musicUrlEl = document.getElementById("musicUrl");
 const musicBtn = document.getElementById("musicBtn");
-const shakeBtn = document.getElementById("shakeBtn");
-const panelEl = document.getElementById("panel");
 
 let engine, runner, render;
 let balls = [];
 let finishers = [];
 let courseBuilt = false;
 let resizeHandlerBound = false;
+let isRunning = false;
 
 let music = new Audio();
 music.loop = true;
@@ -30,6 +31,7 @@ let musicPlaying = false;
 const WORLD = {
   width: 1100,
   height: 12000,
+  margin: 80,
   startY: 180,
   finishY: 11500
 };
@@ -38,20 +40,13 @@ let twitchTimers = [];
 let confetti = [];
 let bigWinText = null;
 
-function hidePanel() {
-  if (!panelEl) return;
-  panelEl.classList.add("fadeout");
-}
-function showPanel() {
-  if (!panelEl) return;
-  panelEl.classList.remove("fadeout");
-}
+function setStatus(msg) { statusEl.textContent = msg; }
 
-function setStatus(msg) {
-  if (statusEl) statusEl.textContent = msg;
+function setPanelRunning(on) {
+  if (!panelEl) return;
+  if (on) panelEl.classList.add("running");
+  else panelEl.classList.remove("running");
 }
-
-function clamp(v, a, b) { return Math.max(a, Math.min(b, v)); }
 
 function resizeCanvasToCSS() {
   const dpr = Math.max(1, Math.min(2, window.devicePixelRatio || 1));
@@ -64,8 +59,10 @@ function resizeCanvasToCSS() {
   }
 }
 
+function clamp(v, a, b) { return Math.max(a, Math.min(b, v)); }
+
 function parseNames() {
-  const lines = (namesEl ? namesEl.value : "")
+  const lines = namesEl.value
     .split("\n")
     .map(s => s.trim())
     .filter(Boolean);
@@ -82,7 +79,6 @@ function initEngine() {
   engine = Engine.create();
   engine.positionIterations = 10;
   engine.velocityIterations = 8;
-  engine.gravity.x = 0;
   engine.gravity.y = 1.0;
 
   render = Render.create({
@@ -108,29 +104,27 @@ function initEngine() {
 }
 
 function clearWorld() {
+  if (runner) Runner.stop(runner);
+  if (render) Render.stop(render);
+  if (engine) {
+    Composite.clear(engine.world, false);
+    Engine.clear(engine);
+  }
+
+  balls = [];
+  finishers = [];
+  confetti = [];
+  bigWinText = null;
+  courseBuilt = false;
+  isRunning = false;
+
   for (const t of twitchTimers) clearInterval(t);
   twitchTimers = [];
 
-  confetti = [];
-  bigWinText = null;
-  balls = [];
-  finishers = [];
-  courseBuilt = false;
+  top5El.innerHTML = "";
+  startBtn.disabled = true;
 
-  if (top5El) top5El.innerHTML = "";
-  if (startBtn) startBtn.disabled = true;
-
-  if (!engine) return;
-
-  if (runner) Runner.stop(runner);
-  if (render) Render.stop(render);
-
-  Composite.clear(engine.world, false);
-  Engine.clear(engine);
-
-  engine = null;
-  runner = null;
-  render = null;
+  setPanelRunning(false);
 }
 
 function boot() {
@@ -139,12 +133,11 @@ function boot() {
   setupCamera();
   setupFinisherDetection();
   setupCustomOverlayDrawing();
-  showPanel();
   setStatus("Paste names → Build Course → Start");
 }
 
 function addWalls() {
-  const t = 90;
+  const t = 80;
   const left = Bodies.rectangle(-t / 2, WORLD.height / 2, t, WORLD.height + 2000, {
     isStatic: true,
     render: { fillStyle: "#1b1b22" }
@@ -176,38 +169,14 @@ function addBumper(x, y, r = 18, style = "#3a3a4a") {
   return b;
 }
 
-function addGateBottleneck(y, gapWidth = 170) {
-  const plateLen = 520;
-  const plateThk = 18;
-
-  addSlope((WORLD.width / 2) - 260, y - 120, plateLen, plateThk, 30);
-  addSlope((WORLD.width / 2) + 260, y - 120, plateLen, plateThk, -30);
-
-  const wallThk = 30;
-  const wallH = 280;
-  const leftX = (WORLD.width - gapWidth) / 2 - wallThk / 2;
-  const rightX = (WORLD.width + gapWidth) / 2 + wallThk / 2;
-
-  const leftWall = Bodies.rectangle(leftX, y + 60, wallThk, wallH, {
-    isStatic: true, render: { fillStyle: "#2a2a36" }
-  });
-  const rightWall = Bodies.rectangle(rightX, y + 60, wallThk, wallH, {
-    isStatic: true, render: { fillStyle: "#2a2a36" }
-  });
-
-  Composite.add(engine.world, [leftWall, rightWall]);
-
-  for (let i = 0; i < 9; i++) addBumper(150 + i * 110, y + 280, 13);
-}
-
-function addSpinner(x, y, radius = 90, spokeCount = 8) {
+function addSpinner(x, y, radius = 85, spokeCount = 10) {
   const hub = Bodies.circle(x, y, radius, {
     isStatic: true,
     render: { fillStyle: "#1c1c28" }
   });
 
   const spokes = [];
-  const spokeLen = radius * 3.0;
+  const spokeLen = radius * 2.8;
   const spokeThk = 22;
 
   for (let i = 0; i < spokeCount; i++) {
@@ -248,40 +217,63 @@ function addTwitchStick(x, y, w = 560, h = 18) {
   Composite.add(engine.world, stick);
 
   const t = setInterval(() => {
-    const a = (Math.random() * 1.1 + 0.55) * (Math.random() < 0.5 ? -1 : 1);
+    const a = (Math.random() * 1.25 + 0.55) * (Math.random() < 0.5 ? -1 : 1);
     Body.rotate(stick, a);
-    setTimeout(() => Body.rotate(stick, -a * 0.92), 90);
+    setTimeout(() => Body.rotate(stick, -a * 0.95), 90);
   }, 1200);
 
   twitchTimers.push(t);
   return stick;
 }
 
-function addReturnRails(yStart, yEnd, step = 420) {
-  // Keeps side balls from free-falling straight down the edges
-  // Alternating inward deflectors near left/right walls
-  const leftX = 110;
-  const rightX = WORLD.width - 110;
-  for (let y = yStart; y <= yEnd; y += step) {
-    const dir = ((y / step) | 0) % 2 === 0 ? 1 : -1;
-    // Left: tilt to push right (positive angle)
-    addSlope(leftX, y, 420, 16, 30 * dir, "#242432");
-    // Right: tilt to push left (negative angle)
-    addSlope(rightX, y + step / 2, 420, 16, -30 * dir, "#242432");
+function addGateBottleneck(y, gapWidth = 170) {
+  const plateLen = 520;
+  const plateThk = 18;
 
-    // Small bumpers near the walls
-    addBumper(70, y + 80, 12, "#2f2f3e");
-    addBumper(WORLD.width - 70, y + 200, 12, "#2f2f3e");
+  addSlope((WORLD.width / 2) - 260, y - 120, plateLen, plateThk, 30, "#2a2a36");
+  addSlope((WORLD.width / 2) + 260, y - 120, plateLen, plateThk, -30, "#2a2a36");
+
+  const wallThk = 30;
+  const wallH = 260;
+  const leftX = (WORLD.width - gapWidth) / 2 - wallThk / 2;
+  const rightX = (WORLD.width + gapWidth) / 2 + wallThk / 2;
+
+  const leftWall = Bodies.rectangle(leftX, y + 60, wallThk, wallH, {
+    isStatic: true, render: { fillStyle: "#2a2a36" }
+  });
+  const rightWall = Bodies.rectangle(rightX, y + 60, wallThk, wallH, {
+    isStatic: true, render: { fillStyle: "#2a2a36" }
+  });
+
+  Composite.add(engine.world, [leftWall, rightWall]);
+
+  for (let i = 0; i < 7; i++) addBumper(170 + i * 130, y + 260, 14);
+}
+
+/* --- FIX: Edge lanes get obstacles + inward “kickers” so nobody free-falls --- */
+function addEdgeKickers(y0, y1, step = 650) {
+  const thk = 18;
+  const len = 360;
+  const inset = 110;
+
+  let flip = false;
+  for (let y = y0; y <= y1; y += step) {
+    // left side kicks inward (down-right)
+    addSlope(inset, y, len, thk, flip ? 42 : 35, "#242432");
+    // right side kicks inward (down-left)
+    addSlope(WORLD.width - inset, y + step / 2, len, thk, flip ? -42 : -35, "#242432");
+    flip = !flip;
   }
 }
 
-function addWideBumperField(yStart, yEnd, yStep = 140, xStep = 130) {
-  // Covers full width so there are no “empty lanes”
-  for (let y = yStart; y <= yEnd; y += yStep) {
-    const offset = ((y / yStep) | 0) % 2 === 0 ? 0 : xStep / 2;
-    for (let x = 120; x <= WORLD.width - 120; x += xStep) {
-      addBumper(x + offset, y, 13);
+function addPegField(y0, y1, x0, x1, dx, dy, r) {
+  let row = 0;
+  for (let y = y0; y <= y1; y += dy) {
+    const offset = (row % 2) ? dx / 2 : 0;
+    for (let x = x0; x <= x1; x += dx) {
+      addBumper(x + offset, y, r);
     }
+    row++;
   }
 }
 
@@ -295,79 +287,97 @@ function buildCourse() {
 
   addWalls();
 
-  // Start chute: NO V cradle. Vertical channel then one committed ramp.
-  const chuteLeft = Bodies.rectangle(330, 330, 26, 520, { isStatic: true, render: { fillStyle: "#2a2a36" } });
-  const chuteRight = Bodies.rectangle(770, 330, 26, 520, { isStatic: true, render: { fillStyle: "#2a2a36" } });
-  Composite.add(engine.world, [chuteLeft, chuteRight]);
+  /* --- START SECTION (FIX: no V-bowl trap) --- */
+  // A narrow chute so everything enters the obstacle field, not the edges.
+  const chuteW = 520;
+  const wallThk = 26;
+  const chuteLeft = (WORLD.width - chuteW) / 2;
+  const chuteRight = (WORLD.width + chuteW) / 2;
 
-  addSlope(560, 620, 980, 18, 45, "#2a2a36");
-  addBumper(560, 760, 18);
+  Composite.add(engine.world, [
+    Bodies.rectangle(chuteLeft - wallThk / 2, 420, wallThk, 640, { isStatic: true, render: { fillStyle: "#2a2a36" } }),
+    Bodies.rectangle(chuteRight + wallThk / 2, 420, wallThk, 640, { isStatic: true, render: { fillStyle: "#2a2a36" } })
+  ]);
 
-  // Rails to prevent edge free-fall (whole course)
-  addReturnRails(900, 10800, 420);
+  // One strong ramp + a small kicker peg
+  addSlope(WORLD.width / 2, 640, 720, 18, 38, "#2a2a36");
+  addBumper(WORLD.width / 2 + 90, 770, 16);
 
-  // Field #1 (wide coverage)
-  addWideBumperField(950, 1850, 140, 150);
+  /* --- FIX: prevent edge free-fall everywhere --- */
+  addEdgeKickers(1100, 10200, 720);
 
-  // Ramp + spinner
-  addSlope(560, 2200, 900, 18, 45);
-  const s1 = addSpinner(560, 2600, 95, 8);
+  // Wide peg field (covers almost full width)
+  addPegField(
+    980, 2300,
+    WORLD.margin + 90, WORLD.width - WORLD.margin - 90,
+    130, 150, 13
+  );
+
+  // 45° long slide + spinner
+  addSlope(560, 2600, 900, 18, 45);
+  const s1 = addSpinner(520, 3000, 95, 7);
   spinConstant(s1, 0.06);
 
-  // Bottleneck #1 + flick
-  addGateBottleneck(3200, 170);
-  addTwitchStick(560, 3550, 620, 18);
+  // More pegs (again, wide)
+  addPegField(
+    3300, 4700,
+    WORLD.margin + 80, WORLD.width - WORLD.margin - 80,
+    140, 160, 12
+  );
 
-  // Shallow drama ramp (still >= 30°)
-  addSlope(560, 3950, 980, 18, 30);
+  // Bottleneck #1
+  addGateBottleneck(5200, 170);
+  addTwitchStick(560, 5600, 560, 18);
 
-  // Separators that span wider
+  // 30° slow drama
+  addSlope(540, 6100, 980, 18, 30);
+
+  // Separators across width (not just center)
   for (let i = 0; i < 10; i++) {
-    const deg = i % 2 === 0 ? 30 : -30;
-    addSlope(200 + i * 90, 4450 + i * 95, 240, 14, deg, "#2d2d3d");
-    addSlope(900 - i * 90, 4450 + i * 95, 240, 14, -deg, "#2d2d3d");
+    const x = WORLD.margin + 140 + i * 95;
+    const y = 6650 + i * 95;
+    addSlope(x, y, 220, 14, i % 2 === 0 ? 30 : -30, "#2d2d3d");
   }
 
-  // Spinner spread zone
-  const s2 = addSpinner(300, 5400, 85, 7);
+  // Spinner field spread (left/center/right)
+  const s2 = addSpinner(260, 7700, 85, 6);
   spinConstant(s2, -0.07);
-  const s3 = addSpinner(820, 5600, 95, 7);
+  const s3 = addSpinner(560, 7900, 95, 6);
   spinConstant(s3, 0.06);
-
-  // Twitch wheel chaos
-  const s4 = addSpinner(560, 6200, 120, 9);
-  spinConstant(s4, 0.03);
-  twitchEvery(s4, 2000);
+  const s4 = addSpinner(860, 7700, 85, 6);
+  spinConstant(s4, 0.07);
+  twitchEvery(s3, 1900);
 
   // Bottleneck #2
-  addGateBottleneck(7000, 160);
+  addGateBottleneck(8800, 160);
+  addTwitchStick(560, 9300, 560, 18);
 
-  // Redirect ramps (keeps motion)
-  addSlope(560, 7600, 980, 18, -45);
-  addSlope(560, 8050, 980, 18, 45);
+  // Chaos canyon (FULL WIDTH)
+  addPegField(
+    9600, 10850,
+    WORLD.margin + 70, WORLD.width - WORLD.margin - 70,
+    120, 135, 12
+  );
 
-  // De-clump stick
-  addTwitchStick(560, 8450, 620, 18);
+  // Final redirect slopes (push toward center, no “catch tray”)
+  addSlope(320, 11180, 680, 18, 35);
+  addSlope(780, 11180, 680, 18, -35);
 
-  // Field #2 (full width)
-  addWideBumperField(8800, 10100, 140, 140);
-
-  // End drama
-  addSlope(560, 10550, 980, 18, -30);
-
-  // Final funnel (inward)
-  addSlope(330, 11180, 700, 18, 35);
-  addSlope(790, 11180, 700, 18, -35);
-
-  const finishBar = Bodies.rectangle(WORLD.width / 2, WORLD.finishY, WORLD.width - 180, 20, {
+  // --- FINISH SENSOR (FIX: it must NEVER catch balls) ---
+  const finishSensor = Bodies.rectangle(WORLD.width / 2, WORLD.finishY, WORLD.width - 160, 16, {
     isStatic: true,
     isSensor: true,
+    collisionFilter: { category: 0x0002, mask: 0x0000 },
     render: { fillStyle: "#6a5acd" }
   });
-  Composite.add(engine.world, finishBar);
+  Composite.add(engine.world, finishSensor);
+
+  // A “drain” below the finish so balls don’t accumulate
+  addSlope(220, WORLD.finishY + 260, 700, 18, -35, "#222233");
+  addSlope(880, WORLD.finishY + 260, 700, 18, 35, "#222233");
 
   courseBuilt = true;
-  if (startBtn) startBtn.disabled = false;
+  startBtn.disabled = false;
   setStatus("Course built. Press Start.");
 }
 
@@ -379,7 +389,7 @@ function spawnBalls(names) {
   const startY = WORLD.startY;
 
   const cols = 11;
-  const spacing = 28;
+  const spacing = 26;
 
   for (let i = 0; i < names.length; i++) {
     const col = i % cols;
@@ -399,11 +409,11 @@ function spawnBalls(names) {
       }
     );
 
-    b.plugin = { idx: i + 1, name: names[i] };
+    b.plugin = { idx: i + 1, name: names[i], finished: false, removed: false };
     balls.push(b);
   }
 
-  if (staggerEl && staggerEl.checked) {
+  if (staggerEl.checked) {
     let k = 0;
     const iv = setInterval(() => {
       if (k >= balls.length) { clearInterval(iv); return; }
@@ -415,6 +425,38 @@ function spawnBalls(names) {
   }
 }
 
+/* --- SHAKE (manual unstuck) --- */
+function shakeWorld() {
+  if (!engine || !balls.length) return;
+
+  const baseGx = engine.gravity.x || 0;
+  const baseGy = engine.gravity.y || 1;
+
+  const bursts = 14;
+  let step = 0;
+
+  const iv = setInterval(() => {
+    const s = (step % 2 === 0) ? 1 : -1;
+    engine.gravity.x = 0.40 * s;
+    engine.gravity.y = baseGy + 0.12 * (Math.random() * 2 - 1);
+
+    for (const b of balls) {
+      if (!b || b.isStatic || (b.plugin && b.plugin.removed)) continue;
+      const fx = (Math.random() * 0.022 - 0.011) * b.mass;
+      const fy = (Math.random() * 0.016 - 0.024) * b.mass;
+      Body.applyForce(b, b.position, { x: fx, y: fy });
+    }
+
+    step++;
+    if (step >= bursts) {
+      clearInterval(iv);
+      engine.gravity.x = baseGx;
+      engine.gravity.y = baseGy;
+    }
+  }, 55);
+}
+
+/* --- CAMERA --- */
 function setupCamera() {
   Events.on(engine, "afterUpdate", () => {
     if (!render) return;
@@ -425,13 +467,22 @@ function setupCamera() {
     let targetY = WORLD.startY;
     let targetX = WORLD.width / 2;
 
+    // leader = greatest y among active (not removed) balls
     if (balls.length) {
-      let leader = balls[0];
+      let leader = null;
       for (const b of balls) {
-        if (b.position.y > leader.position.y) leader = b;
+        if (!b || (b.plugin && b.plugin.removed)) continue;
+        if (!leader || b.position.y > leader.position.y) leader = b;
       }
-      targetY = leader.position.y;
-      targetX = (followLeaderEl && followLeaderEl.checked) ? leader.position.x : WORLD.width / 2;
+      if (leader) {
+        targetY = leader.position.y;
+        targetX = followLeaderEl.checked ? leader.position.x : WORLD.width / 2;
+      }
+    }
+
+    if (finishers.length > 0 && followLeaderEl.checked) {
+      const last = finishers[finishers.length - 1];
+      if (last && last.y != null) targetY = Math.max(targetY, last.y);
     }
 
     const minX = 0, maxX = WORLD.width;
@@ -449,38 +500,58 @@ function setupCamera() {
   });
 }
 
+/* --- FINISH DETECTION (FIX: remove balls so finish doesn’t pile up) --- */
+function removeBallFromWorld_(b) {
+  if (!b || (b.plugin && b.plugin.removed)) return;
+  Composite.remove(engine.world, b);
+  if (b.plugin) b.plugin.removed = true;
+}
+
 function setupFinisherDetection() {
   Events.on(engine, "afterUpdate", () => {
     if (!balls.length) return;
-    if (finishers.length >= 5) return;
 
     for (const b of balls) {
-      if (b.plugin && !b.plugin.finished && b.position.y >= WORLD.finishY + 40) {
+      if (!b || !b.plugin || b.plugin.removed) continue;
+
+      // Record finishers
+      if (!b.plugin.finished && b.position.y >= WORLD.finishY + 40) {
         b.plugin.finished = true;
-        finishers.push(b);
-        updateTop5UI();
-        celebrateFinisher(b, finishers.length);
-        if (finishers.length === 5) setStatus("Top 5 decided! See scoreboard.");
+
+        if (finishers.length < 5) {
+          finishers.push({ idx: b.plugin.idx, name: b.plugin.name, y: b.position.y });
+          updateTop5UI();
+          celebrateFinisher(b, finishers.length);
+          if (finishers.length === 5) setStatus("Top 5 decided! See scoreboard.");
+        }
+
+        // Remove to prevent end pileups
+        setTimeout(() => removeBallFromWorld_(b), 400);
+      }
+
+      // Safety: if any ball goes way below, delete it
+      if (b.position.y >= WORLD.finishY + 1500) {
+        removeBallFromWorld_(b);
       }
     }
   });
 }
 
 function updateTop5UI() {
-  if (!top5El) return;
   top5El.innerHTML = "";
   for (let i = 0; i < finishers.length; i++) {
-    const b = finishers[i];
+    const f = finishers[i];
     const li = document.createElement("li");
-    li.textContent = `#${b.plugin.idx} — ${b.plugin.name}`;
+    li.textContent = `#${f.idx} — ${f.name}`;
     top5El.appendChild(li);
   }
 }
 
+/* --- CONFETTI / OVERLAY --- */
 function celebrateFinisher(ball, rank) {
   ball.render.fillStyle = "#ffd54a";
-  bigWinText = { text: `#${ball.plugin.idx}`, untilMs: performance.now() + 2200 };
-  spawnConfetti(ball.position.x, ball.position.y - 120, 180 + rank * 30);
+  bigWinText = { text: `#${ball.plugin.idx}`, untilMs: performance.now() + 1700 };
+  spawnConfetti(ball.position.x, ball.position.y - 120, 160 + rank * 25);
 }
 
 function spawnConfetti(x, y, count) {
@@ -501,7 +572,7 @@ function setupCustomOverlayDrawing() {
 
     // Ball labels
     for (const b of balls) {
-      if (!b.plugin) continue;
+      if (!b || !b.plugin || b.plugin.removed) continue;
       ctx.save();
       ctx.translate(b.position.x, b.position.y);
       ctx.fillStyle = "#0f0f12";
@@ -538,6 +609,7 @@ function setupCustomOverlayDrawing() {
       ctx.setTransform(1, 0, 0, 1, 0, 0);
       ctx.fillStyle = "rgba(0,0,0,0.30)";
       ctx.fillRect(0, 0, canvas.clientWidth, canvas.clientHeight);
+
       ctx.fillStyle = "#fff";
       ctx.font = "900 140px system-ui, -apple-system, Segoe UI, Roboto, Arial";
       ctx.textAlign = "center";
@@ -551,65 +623,34 @@ function setupCustomOverlayDrawing() {
 }
 
 async function runCountdown() {
-  if (!countdownEl) return;
   countdownEl.classList.remove("hidden");
   const seq = ["3", "2", "1", "GO!"];
   for (const s of seq) {
     countdownEl.textContent = s;
-    await new Promise(r => setTimeout(r, 900));
+    await new Promise(r => setTimeout(r, 850));
   }
   countdownEl.classList.add("hidden");
 }
 
 function tryPlayMusic() {
-  const url = (musicUrlEl ? musicUrlEl.value : "").trim();
+  const url = musicUrlEl.value.trim();
   if (url) music.src = url;
 
   if (!musicPlaying) {
     music.play().then(() => {
       musicPlaying = true;
-      if (musicBtn) musicBtn.textContent = "Pause";
+      musicBtn.textContent = "Pause";
     }).catch(() => {
       setStatus("Music blocked by browser until user interaction. Click Play again.");
     });
   } else {
     music.pause();
     musicPlaying = false;
-    if (musicBtn) musicBtn.textContent = "Play";
+    musicBtn.textContent = "Play";
   }
 }
 
-function shakeWorld() {
-  if (!engine || !balls.length) return;
-
-  const baseGx = engine.gravity.x || 0;
-  const baseGy = engine.gravity.y || 1;
-
-  const bursts = 14;
-  let step = 0;
-
-  const iv = setInterval(() => {
-    const s = (step % 2 === 0) ? 1 : -1;
-    engine.gravity.x = 0.35 * s;
-    engine.gravity.y = baseGy + 0.10 * (Math.random() * 2 - 1);
-
-    for (const b of balls) {
-      if (!b || b.isStatic) continue;
-      const fx = (Math.random() * 0.020 - 0.010) * b.mass;
-      const fy = (Math.random() * 0.016 - 0.022) * b.mass;
-      Body.applyForce(b, b.position, { x: fx, y: fy });
-    }
-
-    step++;
-    if (step >= bursts) {
-      clearInterval(iv);
-      engine.gravity.x = baseGx;
-      engine.gravity.y = baseGy;
-    }
-  }, 55);
-}
-
-// --- UI wiring (bind once) ---
+/* --- UI wiring --- */
 buildBtn.addEventListener("click", () => {
   const names = parseNames();
   if (!names.length) { setStatus("Add at least 1 participant name."); return; }
@@ -621,19 +662,22 @@ shakeBtn.addEventListener("click", () => {
 });
 
 startBtn.addEventListener("click", async () => {
-  if (!courseBuilt) return;
+  if (!courseBuilt || isRunning) return;
 
   const names = parseNames();
   if (!names.length) { setStatus("Add at least 1 participant name."); return; }
+
+  isRunning = true;
+  setPanelRunning(true);
 
   finishers = [];
   updateTop5UI();
   confetti = [];
   bigWinText = null;
 
-  hidePanel();
   setStatus(`Starting ${names.length} participants...`);
   await runCountdown();
+
   spawnBalls(names);
   setStatus("Drop started. First 5 finishers win!");
 });
@@ -647,6 +691,6 @@ musicBtn.addEventListener("click", () => {
   tryPlayMusic();
 });
 
-// Boot
+/* --- Boot --- */
 resizeCanvasToCSS();
 boot();
