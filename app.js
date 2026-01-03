@@ -1,4 +1,6 @@
-const { Engine, Render, Runner, Bodies, Body, Composite, Events } = Matter;
+const {
+  Engine, Render, Runner, Bodies, Body, Composite, Events
+} = Matter;
 
 const canvas = document.getElementById("c");
 const namesEl = document.getElementById("names");
@@ -20,9 +22,6 @@ let balls = [];
 let finishers = [];
 let courseBuilt = false;
 let resizeHandlerBound = false;
-let running = false;
-
-let finishSensor = null;
 
 let music = new Audio();
 music.loop = true;
@@ -31,7 +30,6 @@ let musicPlaying = false;
 const WORLD = {
   width: 1100,
   height: 12000,
-  margin: 80,
   startY: 180,
   finishY: 11500
 };
@@ -40,19 +38,20 @@ let twitchTimers = [];
 let confetti = [];
 let bigWinText = null;
 
-function setStatus(msg) {
-  if (statusEl) statusEl.textContent = msg;
-}
-
 function hidePanel() {
   if (!panelEl) return;
   panelEl.classList.add("fadeout");
 }
-
 function showPanel() {
   if (!panelEl) return;
   panelEl.classList.remove("fadeout");
 }
+
+function setStatus(msg) {
+  if (statusEl) statusEl.textContent = msg;
+}
+
+function clamp(v, a, b) { return Math.max(a, Math.min(b, v)); }
 
 function resizeCanvasToCSS() {
   const dpr = Math.max(1, Math.min(2, window.devicePixelRatio || 1));
@@ -65,14 +64,10 @@ function resizeCanvasToCSS() {
   }
 }
 
-function clamp(v, a, b) {
-  return Math.max(a, Math.min(b, v));
-}
-
 function parseNames() {
-  const lines = (namesEl?.value || "")
+  const lines = (namesEl ? namesEl.value : "")
     .split("\n")
-    .map((s) => s.trim())
+    .map(s => s.trim())
     .filter(Boolean);
 
   const names = lines.map((line, i) => {
@@ -113,9 +108,6 @@ function initEngine() {
 }
 
 function clearWorld() {
-  running = false;
-  finishSensor = null;
-
   for (const t of twitchTimers) clearInterval(t);
   twitchTimers = [];
 
@@ -135,28 +127,29 @@ function clearWorld() {
 
   Composite.clear(engine.world, false);
   Engine.clear(engine);
+
   engine = null;
   runner = null;
   render = null;
 }
 
 function boot() {
-  showPanel();
   resizeCanvasToCSS();
   initEngine();
   setupCamera();
-  setupFinishSensorDetection();
+  setupFinisherDetection();
   setupCustomOverlayDrawing();
+  showPanel();
   setStatus("Paste names → Build Course → Start");
 }
 
 function addWalls() {
-  const t = 80;
-  const left = Bodies.rectangle(-t / 2, WORLD.height / 2, t, WORLD.height + 1000, {
+  const t = 90;
+  const left = Bodies.rectangle(-t / 2, WORLD.height / 2, t, WORLD.height + 2000, {
     isStatic: true,
     render: { fillStyle: "#1b1b22" }
   });
-  const right = Bodies.rectangle(WORLD.width + t / 2, WORLD.height / 2, t, WORLD.height + 1000, {
+  const right = Bodies.rectangle(WORLD.width + t / 2, WORLD.height / 2, t, WORLD.height + 2000, {
     isStatic: true,
     render: { fillStyle: "#1b1b22" }
   });
@@ -164,7 +157,7 @@ function addWalls() {
 }
 
 function addSlope(x, y, w, h, deg, style = "#2a2a36") {
-  const angle = (deg * Math.PI) / 180;
+  const angle = deg * Math.PI / 180;
   const body = Bodies.rectangle(x, y, w, h, {
     isStatic: true,
     angle,
@@ -174,10 +167,10 @@ function addSlope(x, y, w, h, deg, style = "#2a2a36") {
   return body;
 }
 
-function addBumper(x, y, r = 18) {
+function addBumper(x, y, r = 18, style = "#3a3a4a") {
   const b = Bodies.circle(x, y, r, {
     isStatic: true,
-    render: { fillStyle: "#3a3a4a" }
+    render: { fillStyle: style }
   });
   Composite.add(engine.world, b);
   return b;
@@ -187,36 +180,34 @@ function addGateBottleneck(y, gapWidth = 170) {
   const plateLen = 520;
   const plateThk = 18;
 
-  addSlope(WORLD.width / 2 - 260, y - 120, plateLen, plateThk, 30, "#2a2a36");
-  addSlope(WORLD.width / 2 + 260, y - 120, plateLen, plateThk, -30, "#2a2a36");
+  addSlope((WORLD.width / 2) - 260, y - 120, plateLen, plateThk, 30);
+  addSlope((WORLD.width / 2) + 260, y - 120, plateLen, plateThk, -30);
 
   const wallThk = 30;
-  const wallH = 260;
+  const wallH = 280;
   const leftX = (WORLD.width - gapWidth) / 2 - wallThk / 2;
   const rightX = (WORLD.width + gapWidth) / 2 + wallThk / 2;
 
   const leftWall = Bodies.rectangle(leftX, y + 60, wallThk, wallH, {
-    isStatic: true,
-    render: { fillStyle: "#2a2a36" }
+    isStatic: true, render: { fillStyle: "#2a2a36" }
   });
   const rightWall = Bodies.rectangle(rightX, y + 60, wallThk, wallH, {
-    isStatic: true,
-    render: { fillStyle: "#2a2a36" }
+    isStatic: true, render: { fillStyle: "#2a2a36" }
   });
 
   Composite.add(engine.world, [leftWall, rightWall]);
 
-  for (let i = 0; i < 7; i++) addBumper(170 + i * 130, y + 260, 14);
+  for (let i = 0; i < 9; i++) addBumper(150 + i * 110, y + 280, 13);
 }
 
-function addSpinner(x, y, radius = 85, spokeCount = 10) {
+function addSpinner(x, y, radius = 90, spokeCount = 8) {
   const hub = Bodies.circle(x, y, radius, {
     isStatic: true,
     render: { fillStyle: "#1c1c28" }
   });
 
   const spokes = [];
-  const spokeLen = radius * 2.8;
+  const spokeLen = radius * 3.0;
   const spokeThk = 22;
 
   for (let i = 0; i < spokeCount; i++) {
@@ -257,85 +248,123 @@ function addTwitchStick(x, y, w = 560, h = 18) {
   Composite.add(engine.world, stick);
 
   const t = setInterval(() => {
-    const a = (Math.random() * 1.25 + 0.55) * (Math.random() < 0.5 ? -1 : 1);
+    const a = (Math.random() * 1.1 + 0.55) * (Math.random() < 0.5 ? -1 : 1);
     Body.rotate(stick, a);
-    setTimeout(() => Body.rotate(stick, -a * 0.95), 90);
+    setTimeout(() => Body.rotate(stick, -a * 0.92), 90);
   }, 1200);
 
   twitchTimers.push(t);
   return stick;
 }
 
+function addReturnRails(yStart, yEnd, step = 420) {
+  // Keeps side balls from free-falling straight down the edges
+  // Alternating inward deflectors near left/right walls
+  const leftX = 110;
+  const rightX = WORLD.width - 110;
+  for (let y = yStart; y <= yEnd; y += step) {
+    const dir = ((y / step) | 0) % 2 === 0 ? 1 : -1;
+    // Left: tilt to push right (positive angle)
+    addSlope(leftX, y, 420, 16, 30 * dir, "#242432");
+    // Right: tilt to push left (negative angle)
+    addSlope(rightX, y + step / 2, 420, 16, -30 * dir, "#242432");
+
+    // Small bumpers near the walls
+    addBumper(70, y + 80, 12, "#2f2f3e");
+    addBumper(WORLD.width - 70, y + 200, 12, "#2f2f3e");
+  }
+}
+
+function addWideBumperField(yStart, yEnd, yStep = 140, xStep = 130) {
+  // Covers full width so there are no “empty lanes”
+  for (let y = yStart; y <= yEnd; y += yStep) {
+    const offset = ((y / yStep) | 0) % 2 === 0 ? 0 : xStep / 2;
+    for (let x = 120; x <= WORLD.width - 120; x += xStep) {
+      addBumper(x + offset, y, 13);
+    }
+  }
+}
+
 function buildCourse() {
   clearWorld();
-  showPanel();
   resizeCanvasToCSS();
   initEngine();
   setupCamera();
-  setupFinishSensorDetection();
+  setupFinisherDetection();
   setupCustomOverlayDrawing();
 
   addWalls();
 
-  // START CHUTE (fixes “balls don’t go down”)
-  Composite.add(engine.world, [
-    Bodies.rectangle(160, 320, 24, 380, { isStatic: true, render: { fillStyle: "#2a2a36" } }),
-    Bodies.rectangle(940, 320, 24, 380, { isStatic: true, render: { fillStyle: "#2a2a36" } })
-  ]);
-  addSlope(560, 560, 920, 18, 45, "#2a2a36");
-  addBumper(560, 720, 18);
+  // Start chute: NO V cradle. Vertical channel then one committed ramp.
+  const chuteLeft = Bodies.rectangle(330, 330, 26, 520, { isStatic: true, render: { fillStyle: "#2a2a36" } });
+  const chuteRight = Bodies.rectangle(770, 330, 26, 520, { isStatic: true, render: { fillStyle: "#2a2a36" } });
+  Composite.add(engine.world, [chuteLeft, chuteRight]);
 
-  for (let y = 850; y <= 1700; y += 120) {
-    for (let x = 180; x <= 920; x += 140) {
-      addBumper(x + ((y / 120) % 2) * 40, y, 14);
-    }
-  }
+  addSlope(560, 620, 980, 18, 45, "#2a2a36");
+  addBumper(560, 760, 18);
 
-  addSlope(560, 2100, 900, 18, 45);
-  const s1 = addSpinner(520, 2500, 95, 7);
+  // Rails to prevent edge free-fall (whole course)
+  addReturnRails(900, 10800, 420);
+
+  // Field #1 (wide coverage)
+  addWideBumperField(950, 1850, 140, 150);
+
+  // Ramp + spinner
+  addSlope(560, 2200, 900, 18, 45);
+  const s1 = addSpinner(560, 2600, 95, 8);
   spinConstant(s1, 0.06);
 
-  addGateBottleneck(3000, 170);
-  addTwitchStick(560, 3320, 560, 18);
+  // Bottleneck #1 + flick
+  addGateBottleneck(3200, 170);
+  addTwitchStick(560, 3550, 620, 18);
 
-  addSlope(540, 3800, 980, 18, 30);
+  // Shallow drama ramp (still >= 30°)
+  addSlope(560, 3950, 980, 18, 30);
 
-  for (let i = 0; i < 8; i++) {
-    addSlope(240 + i * 95, 4300 + i * 90, 180, 14, i % 2 === 0 ? 30 : -30, "#2d2d3d");
+  // Separators that span wider
+  for (let i = 0; i < 10; i++) {
+    const deg = i % 2 === 0 ? 30 : -30;
+    addSlope(200 + i * 90, 4450 + i * 95, 240, 14, deg, "#2d2d3d");
+    addSlope(900 - i * 90, 4450 + i * 95, 240, 14, -deg, "#2d2d3d");
   }
 
-  const s2 = addSpinner(300, 5200, 80, 6);
+  // Spinner spread zone
+  const s2 = addSpinner(300, 5400, 85, 7);
   spinConstant(s2, -0.07);
-  const s3 = addSpinner(820, 5400, 90, 6);
+  const s3 = addSpinner(820, 5600, 95, 7);
   spinConstant(s3, 0.06);
 
-  const s4 = addSpinner(560, 6000, 110, 8);
+  // Twitch wheel chaos
+  const s4 = addSpinner(560, 6200, 120, 9);
   spinConstant(s4, 0.03);
   twitchEvery(s4, 2000);
 
-  addGateBottleneck(6800, 160);
+  // Bottleneck #2
+  addGateBottleneck(7000, 160);
 
-  addSlope(560, 7300, 900, 18, -45);
-  addSlope(560, 7700, 900, 18, 45);
+  // Redirect ramps (keeps motion)
+  addSlope(560, 7600, 980, 18, -45);
+  addSlope(560, 8050, 980, 18, 45);
 
-  addTwitchStick(560, 8200, 560, 18);
+  // De-clump stick
+  addTwitchStick(560, 8450, 620, 18);
 
-  for (let y = 8600; y <= 9900; y += 120) {
-    for (let x = 160; x <= 940; x += 130) addBumper(x + ((y / 120) % 2) * 35, y, 13);
-  }
+  // Field #2 (full width)
+  addWideBumperField(8800, 10100, 140, 140);
 
-  addSlope(560, 10450, 980, 18, -30);
+  // End drama
+  addSlope(560, 10550, 980, 18, -30);
 
-  addSlope(330, 11150, 700, 18, 35);
-  addSlope(790, 11150, 700, 18, -35);
+  // Final funnel (inward)
+  addSlope(330, 11180, 700, 18, 35);
+  addSlope(790, 11180, 700, 18, -35);
 
-  finishSensor = Bodies.rectangle(WORLD.width / 2, WORLD.finishY, WORLD.width - 180, 28, {
+  const finishBar = Bodies.rectangle(WORLD.width / 2, WORLD.finishY, WORLD.width - 180, 20, {
     isStatic: true,
     isSensor: true,
-    label: "finishSensor",
     render: { fillStyle: "#6a5acd" }
   });
-  Composite.add(engine.world, finishSensor);
+  Composite.add(engine.world, finishBar);
 
   courseBuilt = true;
   if (startBtn) startBtn.disabled = false;
@@ -350,7 +379,7 @@ function spawnBalls(names) {
   const startY = WORLD.startY;
 
   const cols = 11;
-  const spacing = 26;
+  const spacing = 28;
 
   for (let i = 0; i < names.length; i++) {
     const col = i % cols;
@@ -370,25 +399,17 @@ function spawnBalls(names) {
       }
     );
 
-    b.label = "ball";
-    b.plugin = { idx: i + 1, name: names[i], finished: false };
+    b.plugin = { idx: i + 1, name: names[i] };
     balls.push(b);
   }
 
   if (staggerEl && staggerEl.checked) {
     let k = 0;
     const iv = setInterval(() => {
-      if (!engine || !engine.world) {
-        clearInterval(iv);
-        return;
-      }
-      if (k >= balls.length) {
-        clearInterval(iv);
-        return;
-      }
+      if (k >= balls.length) { clearInterval(iv); return; }
       Composite.add(world, balls[k]);
       k++;
-    }, 120);
+    }, 110);
   } else {
     Composite.add(world, balls);
   }
@@ -405,18 +426,12 @@ function setupCamera() {
     let targetX = WORLD.width / 2;
 
     if (balls.length) {
-      let leader = null;
+      let leader = balls[0];
       for (const b of balls) {
-        if (!leader || b.position.y > leader.position.y) leader = b;
+        if (b.position.y > leader.position.y) leader = b;
       }
-      if (leader) {
-        targetY = leader.position.y;
-        targetX = (followLeaderEl && followLeaderEl.checked) ? leader.position.x : WORLD.width / 2;
-      }
-    }
-
-    if (finishers.length > 0 && followLeaderEl && followLeaderEl.checked) {
-      targetY = Math.max(targetY, finishers[finishers.length - 1].position.y);
+      targetY = leader.position.y;
+      targetX = (followLeaderEl && followLeaderEl.checked) ? leader.position.x : WORLD.width / 2;
     }
 
     const minX = 0, maxX = WORLD.width;
@@ -434,31 +449,18 @@ function setupCamera() {
   });
 }
 
-function setupFinishSensorDetection() {
-  Events.on(engine, "collisionStart", (evt) => {
-    if (!running) return;
-    if (!evt || !evt.pairs) return;
+function setupFinisherDetection() {
+  Events.on(engine, "afterUpdate", () => {
+    if (!balls.length) return;
     if (finishers.length >= 5) return;
 
-    for (const pair of evt.pairs) {
-      const a = pair.bodyA;
-      const b = pair.bodyB;
-
-      const ball = (a.label === "ball") ? a : (b.label === "ball") ? b : null;
-      const sensor = (a.label === "finishSensor") ? a : (b.label === "finishSensor") ? b : null;
-
-      if (!ball || !sensor) continue;
-      if (!ball.plugin || ball.plugin.finished) continue;
-
-      ball.plugin.finished = true;
-      finishers.push(ball);
-      updateTop5UI();
-      celebrateFinisher(ball, finishers.length);
-
-      if (finishers.length === 5) {
-        setStatus("Top 5 decided! See scoreboard.");
-        running = false;
-        setTimeout(() => showPanel(), 1200);
+    for (const b of balls) {
+      if (b.plugin && !b.plugin.finished && b.position.y >= WORLD.finishY + 40) {
+        b.plugin.finished = true;
+        finishers.push(b);
+        updateTop5UI();
+        celebrateFinisher(b, finishers.length);
+        if (finishers.length === 5) setStatus("Top 5 decided! See scoreboard.");
       }
     }
   });
@@ -477,12 +479,7 @@ function updateTop5UI() {
 
 function celebrateFinisher(ball, rank) {
   ball.render.fillStyle = "#ffd54a";
-
-  bigWinText = {
-    text: `#${ball.plugin.idx}`,
-    untilMs: performance.now() + 2200
-  };
-
+  bigWinText = { text: `#${ball.plugin.idx}`, untilMs: performance.now() + 2200 };
   spawnConfetti(ball.position.x, ball.position.y - 120, 180 + rank * 30);
 }
 
@@ -490,8 +487,8 @@ function spawnConfetti(x, y, count) {
   for (let i = 0; i < count; i++) {
     confetti.push({
       x, y,
-      vx: Math.random() * 8 - 4,
-      vy: Math.random() * -10 - 3,
+      vx: (Math.random() * 8 - 4),
+      vy: (Math.random() * -10 - 3),
       life: 140 + Math.random() * 60,
       r: 2 + Math.random() * 3
     });
@@ -502,7 +499,7 @@ function setupCustomOverlayDrawing() {
   Events.on(render, "afterRender", () => {
     const ctx = render.context;
 
-    // Ball number labels
+    // Ball labels
     for (const b of balls) {
       if (!b.plugin) continue;
       ctx.save();
@@ -515,7 +512,7 @@ function setupCustomOverlayDrawing() {
       ctx.restore();
     }
 
-    // Confetti update/draw
+    // Confetti
     for (let i = confetti.length - 1; i >= 0; i--) {
       const p = confetti[i];
       p.vy += 0.22;
@@ -541,7 +538,6 @@ function setupCustomOverlayDrawing() {
       ctx.setTransform(1, 0, 0, 1, 0, 0);
       ctx.fillStyle = "rgba(0,0,0,0.30)";
       ctx.fillRect(0, 0, canvas.clientWidth, canvas.clientHeight);
-
       ctx.fillStyle = "#fff";
       ctx.font = "900 140px system-ui, -apple-system, Segoe UI, Roboto, Arial";
       ctx.textAlign = "center";
@@ -560,13 +556,13 @@ async function runCountdown() {
   const seq = ["3", "2", "1", "GO!"];
   for (const s of seq) {
     countdownEl.textContent = s;
-    await new Promise((r) => setTimeout(r, 900));
+    await new Promise(r => setTimeout(r, 900));
   }
   countdownEl.classList.add("hidden");
 }
 
 function tryPlayMusic() {
-  const url = (musicUrlEl?.value || "").trim();
+  const url = (musicUrlEl ? musicUrlEl.value : "").trim();
   if (url) music.src = url;
 
   if (!musicPlaying) {
@@ -607,70 +603,49 @@ function shakeWorld() {
     step++;
     if (step >= bursts) {
       clearInterval(iv);
-      if (engine) {
-        engine.gravity.x = baseGx;
-        engine.gravity.y = baseGy;
-      }
+      engine.gravity.x = baseGx;
+      engine.gravity.y = baseGy;
     }
   }, 55);
 }
 
-// --- UI wiring ---
-if (buildBtn) {
-  buildBtn.addEventListener("click", () => {
-    const names = parseNames();
-    if (!names.length) {
-      setStatus("Add at least 1 participant name.");
-      return;
-    }
-    buildCourse();
-  });
-}
+// --- UI wiring (bind once) ---
+buildBtn.addEventListener("click", () => {
+  const names = parseNames();
+  if (!names.length) { setStatus("Add at least 1 participant name."); return; }
+  buildCourse();
+});
 
-if (shakeBtn) {
-  shakeBtn.addEventListener("click", () => {
-    shakeWorld();
-  });
-}
+shakeBtn.addEventListener("click", () => {
+  shakeWorld();
+});
 
-if (startBtn) {
-  startBtn.addEventListener("click", async () => {
-    if (!courseBuilt || running) return;
+startBtn.addEventListener("click", async () => {
+  if (!courseBuilt) return;
 
-    const names = parseNames();
-    if (!names.length) {
-      setStatus("Add at least 1 participant name.");
-      return;
-    }
+  const names = parseNames();
+  if (!names.length) { setStatus("Add at least 1 participant name."); return; }
 
-    finishers = [];
-    confetti = [];
-    bigWinText = null;
-    updateTop5UI();
+  finishers = [];
+  updateTop5UI();
+  confetti = [];
+  bigWinText = null;
 
-    setStatus(`Starting ${names.length} participants...`);
-    await runCountdown();
+  hidePanel();
+  setStatus(`Starting ${names.length} participants...`);
+  await runCountdown();
+  spawnBalls(names);
+  setStatus("Drop started. First 5 finishers win!");
+});
 
-    running = true;
-    hidePanel();
-    spawnBalls(names);
+resetBtn.addEventListener("click", () => {
+  clearWorld();
+  boot();
+});
 
-    setStatus("Drop started. First 5 finishers win!");
-  });
-}
-
-if (resetBtn) {
-  resetBtn.addEventListener("click", () => {
-    clearWorld();
-    boot();
-  });
-}
-
-if (musicBtn) {
-  musicBtn.addEventListener("click", () => {
-    tryPlayMusic();
-  });
-}
+musicBtn.addEventListener("click", () => {
+  tryPlayMusic();
+});
 
 // Boot
 resizeCanvasToCSS();
