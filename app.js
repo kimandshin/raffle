@@ -1,6 +1,4 @@
-const {
-  Engine, Render, Runner, Bodies, Body, Composite, Events
-} = Matter;
+const { Engine, Render, Runner, Bodies, Body, Composite, Events } = Matter;
 
 const canvas = document.getElementById("c");
 const namesEl = document.getElementById("names");
@@ -14,35 +12,47 @@ const countdownEl = document.getElementById("countdown");
 const top5El = document.getElementById("top5");
 const musicUrlEl = document.getElementById("musicUrl");
 const musicBtn = document.getElementById("musicBtn");
+const shakeBtn = document.getElementById("shakeBtn");
+const panelEl = document.getElementById("panel");
 
 let engine, runner, render;
 let balls = [];
-let finishers = []; // store ball objects in order
+let finishers = [];
 let courseBuilt = false;
 let resizeHandlerBound = false;
+let running = false;
+
+let finishSensor = null;
 
 let music = new Audio();
 music.loop = true;
 let musicPlaying = false;
 
-// Course dimensions (vertical)
 const WORLD = {
   width: 1100,
-  height: 12000,     // long drop to ensure 30+ sec
+  height: 12000,
   margin: 80,
-  startY: 250,
+  startY: 180,
   finishY: 11500
 };
 
-// Twitchers/wheels scheduled impulses
 let twitchTimers = [];
-
-// Confetti particles (drawn in afterRender)
 let confetti = [];
-let bigWinText = null; // {text, untilMs}
+let bigWinText = null;
 
-// --- Utilities ---
-function setStatus(msg) { statusEl.textContent = msg; }
+function setStatus(msg) {
+  if (statusEl) statusEl.textContent = msg;
+}
+
+function hidePanel() {
+  if (!panelEl) return;
+  panelEl.classList.add("fadeout");
+}
+
+function showPanel() {
+  if (!panelEl) return;
+  panelEl.classList.remove("fadeout");
+}
 
 function resizeCanvasToCSS() {
   const dpr = Math.max(1, Math.min(2, window.devicePixelRatio || 1));
@@ -55,12 +65,14 @@ function resizeCanvasToCSS() {
   }
 }
 
-function clamp(v, a, b) { return Math.max(a, Math.min(b, v)); }
+function clamp(v, a, b) {
+  return Math.max(a, Math.min(b, v));
+}
 
 function parseNames() {
-  const lines = namesEl.value
+  const lines = (namesEl?.value || "")
     .split("\n")
-    .map(s => s.trim())
+    .map((s) => s.trim())
     .filter(Boolean);
 
   const names = lines.map((line, i) => {
@@ -68,13 +80,14 @@ function parseNames() {
     return cleaned || `Player ${i + 1}`;
   });
 
-  return names.slice(0, 55); // hard cap per your spec
+  return names.slice(0, 55);
 }
 
 function initEngine() {
   engine = Engine.create();
   engine.positionIterations = 10;
   engine.velocityIterations = 8;
+  engine.gravity.x = 0;
   engine.gravity.y = 1.0;
 
   render = Render.create({
@@ -94,63 +107,64 @@ function initEngine() {
   Render.run(render);
 
   if (!resizeHandlerBound) {
-  window.addEventListener("resize", () => resizeCanvasToCSS());
-  resizeHandlerBound = true;
-}
+    window.addEventListener("resize", () => resizeCanvasToCSS());
+    resizeHandlerBound = true;
+  }
 }
 
 function clearWorld() {
-  if (!engine) {
+  running = false;
+  finishSensor = null;
+
+  for (const t of twitchTimers) clearInterval(t);
+  twitchTimers = [];
+
+  confetti = [];
+  bigWinText = null;
   balls = [];
   finishers = [];
   courseBuilt = false;
-  confetti = [];
-  bigWinText = null;
-  for (const t of twitchTimers) clearInterval(t);
-  twitchTimers = [];
-  top5El.innerHTML = "";
-  startBtn.disabled = true;
-  return;
-}
+
+  if (top5El) top5El.innerHTML = "";
+  if (startBtn) startBtn.disabled = true;
+
+  if (!engine) return;
+
   if (runner) Runner.stop(runner);
   if (render) Render.stop(render);
+
   Composite.clear(engine.world, false);
   Engine.clear(engine);
-  balls = [];
-  finishers = [];
-  courseBuilt = false;
-  confetti = [];
-  bigWinText = null;
-
-  for (const t of twitchTimers) clearInterval(t);
-  twitchTimers = [];
-
-  top5El.innerHTML = "";
-  startBtn.disabled = true;
+  engine = null;
+  runner = null;
+  render = null;
 }
 
 function boot() {
+  showPanel();
   resizeCanvasToCSS();
   initEngine();
   setupCamera();
-  setupFinisherDetection();
+  setupFinishSensorDetection();
   setupCustomOverlayDrawing();
   setStatus("Paste names → Build Course → Start");
 }
 
 function addWalls() {
   const t = 80;
-  const left = Bodies.rectangle(-t/2, WORLD.height/2, t, WORLD.height + 1000, {
-    isStatic: true, render: { fillStyle: "#1b1b22" }
+  const left = Bodies.rectangle(-t / 2, WORLD.height / 2, t, WORLD.height + 1000, {
+    isStatic: true,
+    render: { fillStyle: "#1b1b22" }
   });
-  const right = Bodies.rectangle(WORLD.width + t/2, WORLD.height/2, t, WORLD.height + 1000, {
-    isStatic: true, render: { fillStyle: "#1b1b22" }
+  const right = Bodies.rectangle(WORLD.width + t / 2, WORLD.height / 2, t, WORLD.height + 1000, {
+    isStatic: true,
+    render: { fillStyle: "#1b1b22" }
   });
   Composite.add(engine.world, [left, right]);
 }
 
-function addSlope(x, y, w, h, deg, style="#2a2a36") {
-  const angle = deg * Math.PI / 180;
+function addSlope(x, y, w, h, deg, style = "#2a2a36") {
+  const angle = (deg * Math.PI) / 180;
   const body = Bodies.rectangle(x, y, w, h, {
     isStatic: true,
     angle,
@@ -160,7 +174,7 @@ function addSlope(x, y, w, h, deg, style="#2a2a36") {
   return body;
 }
 
-function addBumper(x, y, r=18) {
+function addBumper(x, y, r = 18) {
   const b = Bodies.circle(x, y, r, {
     isStatic: true,
     render: { fillStyle: "#3a3a4a" }
@@ -169,49 +183,46 @@ function addBumper(x, y, r=18) {
   return b;
 }
 
-function addGateBottleneck(y, gapWidth=170) {
-  // Two-lane funnel using angled plates (>= 30°)
+function addGateBottleneck(y, gapWidth = 170) {
   const plateLen = 520;
   const plateThk = 18;
 
-  // Left plate slopes down-right at +30°
-  addSlope((WORLD.width/2) - 260, y - 120, plateLen, plateThk, 30, "#2a2a36");
-  // Right plate slopes down-left at -30°
-  addSlope((WORLD.width/2) + 260, y - 120, plateLen, plateThk, -30, "#2a2a36");
+  addSlope(WORLD.width / 2 - 260, y - 120, plateLen, plateThk, 30, "#2a2a36");
+  addSlope(WORLD.width / 2 + 260, y - 120, plateLen, plateThk, -30, "#2a2a36");
 
-  // Create narrow "gate" using vertical walls (not a flat surface)
   const wallThk = 30;
   const wallH = 260;
-  const leftX = (WORLD.width - gapWidth)/2 - wallThk/2;
-  const rightX = (WORLD.width + gapWidth)/2 + wallThk/2;
+  const leftX = (WORLD.width - gapWidth) / 2 - wallThk / 2;
+  const rightX = (WORLD.width + gapWidth) / 2 + wallThk / 2;
 
   const leftWall = Bodies.rectangle(leftX, y + 60, wallThk, wallH, {
-    isStatic: true, render: { fillStyle: "#2a2a36" }
+    isStatic: true,
+    render: { fillStyle: "#2a2a36" }
   });
   const rightWall = Bodies.rectangle(rightX, y + 60, wallThk, wallH, {
-    isStatic: true, render: { fillStyle: "#2a2a36" }
+    isStatic: true,
+    render: { fillStyle: "#2a2a36" }
   });
 
   Composite.add(engine.world, [leftWall, rightWall]);
 
-  // De-clump bumpers after gate
-  for (let i = 0; i < 7; i++) addBumper(170 + i*130, y + 260, 14);
+  for (let i = 0; i < 7; i++) addBumper(170 + i * 130, y + 260, 14);
 }
 
-function addSpinner(x, y, radius=85, spokeCount=10) {
+function addSpinner(x, y, radius = 85, spokeCount = 10) {
   const hub = Bodies.circle(x, y, radius, {
     isStatic: true,
     render: { fillStyle: "#1c1c28" }
   });
 
   const spokes = [];
-  const spokeLen = radius * 2.8;  // LONG
-  const spokeThk = 22;           // THICK
+  const spokeLen = radius * 2.8;
+  const spokeThk = 22;
 
-  for (let i=0;i<spokeCount;i++) {
+  for (let i = 0; i < spokeCount; i++) {
     const spoke = Bodies.rectangle(x, y, spokeLen, spokeThk, {
       isStatic: true,
-      angle: (Math.PI*2*i)/spokeCount,
+      angle: (Math.PI * 2 * i) / spokeCount,
       render: { fillStyle: "#4a4a66" }
     });
     spokes.push(spoke);
@@ -228,8 +239,7 @@ function spinConstant(spinner, angularSpeed) {
   });
 }
 
-function twitchEvery(spinner, ms=2000) {
-  // Every ms, apply a random angular “twitch”
+function twitchEvery(spinner, ms = 2000) {
   const t = setInterval(() => {
     const amt = (Math.random() * 0.9 + 0.25) * (Math.random() < 0.5 ? -1 : 1);
     Body.rotate(spinner.hub, amt);
@@ -238,7 +248,7 @@ function twitchEvery(spinner, ms=2000) {
   twitchTimers.push(t);
 }
 
-function addTwitchStick(x, y, w=560, h=18) {
+function addTwitchStick(x, y, w = 560, h = 18) {
   const stick = Bodies.rectangle(x, y, w, h, {
     isStatic: true,
     angle: 0,
@@ -247,11 +257,8 @@ function addTwitchStick(x, y, w=560, h=18) {
   Composite.add(engine.world, stick);
 
   const t = setInterval(() => {
-    // Bigger twitch
     const a = (Math.random() * 1.25 + 0.55) * (Math.random() < 0.5 ? -1 : 1);
     Body.rotate(stick, a);
-
-    // Snap-back flick (creates upward impulses)
     setTimeout(() => Body.rotate(stick, -a * 0.95), 90);
   }, 1200);
 
@@ -261,92 +268,77 @@ function addTwitchStick(x, y, w=560, h=18) {
 
 function buildCourse() {
   clearWorld();
+  showPanel();
   resizeCanvasToCSS();
   initEngine();
   setupCamera();
-  setupFinisherDetection();
+  setupFinishSensorDetection();
   setupCustomOverlayDrawing();
 
   addWalls();
 
-  // The “track” is built from angled plates and bumpers.
-  // Mostly vertical with some 45° and a couple 30° sections.
+  // START CHUTE (fixes “balls don’t go down”)
+  Composite.add(engine.world, [
+    Bodies.rectangle(160, 320, 24, 380, { isStatic: true, render: { fillStyle: "#2a2a36" } }),
+    Bodies.rectangle(940, 320, 24, 380, { isStatic: true, render: { fillStyle: "#2a2a36" } })
+  ]);
+  addSlope(560, 560, 920, 18, 45, "#2a2a36");
+  addBumper(560, 720, 18);
 
-  // Start funnel
-  addSlope(320, 250, 780, 18, 30);
-  addSlope(780, 250, 780, 18, -30);
-  addSlope(260, 420, 520, 18, 45);
-  addSlope(840, 520, 520, 18, -45);
-
-  // Section 1: peg/bumpers to prevent clumps
   for (let y = 850; y <= 1700; y += 120) {
     for (let x = 180; x <= 920; x += 140) {
-      addBumper(x + ((y/120)%2)*40, y, 14);
+      addBumper(x + ((y / 120) % 2) * 40, y, 14);
     }
   }
 
-  // 45° long slide + spinner slow-down
   addSlope(560, 2100, 900, 18, 45);
   const s1 = addSpinner(520, 2500, 95, 7);
   spinConstant(s1, 0.06);
 
-  // Bottleneck zone #1 (2-lane)
   addGateBottleneck(3000, 170);
-
-  // Twitch stick after gate (flick up)
   addTwitchStick(560, 3320, 560, 18);
 
-  // 30° shallow section (slower)
   addSlope(540, 3800, 980, 18, 30);
 
-  // “Separators” – small alternating ramps
   for (let i = 0; i < 8; i++) {
-    addSlope(240 + i*95, 4300 + i*90, 180, 14, i%2===0 ? 30 : -30, "#2d2d3d");
+    addSlope(240 + i * 95, 4300 + i * 90, 180, 14, i % 2 === 0 ? 30 : -30, "#2d2d3d");
   }
 
-  // Spinner field (slows + spreads)
   const s2 = addSpinner(300, 5200, 80, 6);
   spinConstant(s2, -0.07);
   const s3 = addSpinner(820, 5400, 90, 6);
   spinConstant(s3, 0.06);
 
-  // Twitch wheel zone (every 2s)
   const s4 = addSpinner(560, 6000, 110, 8);
   spinConstant(s4, 0.03);
   twitchEvery(s4, 2000);
 
-  // Bottleneck zone #2
   addGateBottleneck(6800, 160);
 
-  // Big 45° + a hard redirect
   addSlope(560, 7300, 900, 18, -45);
   addSlope(560, 7700, 900, 18, 45);
 
-  // Another twitch stick to de-clump
   addTwitchStick(560, 8200, 560, 18);
 
-  // Long “chaos canyon” bumpers
   for (let y = 8600; y <= 9900; y += 120) {
-    for (let x = 160; x <= 940; x += 130) addBumper(x + ((y/120)%2)*35, y, 13);
+    for (let x = 160; x <= 940; x += 130) addBumper(x + ((y / 120) % 2) * 35, y, 13);
   }
 
-  // Another 30° slope near end (slow drama)
   addSlope(560, 10450, 980, 18, -30);
 
-  // Final funnel to finish
   addSlope(330, 11150, 700, 18, 35);
   addSlope(790, 11150, 700, 18, -35);
 
-  // Finish line visual bar
-  const finishBar = Bodies.rectangle(WORLD.width/2, WORLD.finishY, WORLD.width - 180, 20, {
+  finishSensor = Bodies.rectangle(WORLD.width / 2, WORLD.finishY, WORLD.width - 180, 28, {
     isStatic: true,
     isSensor: true,
+    label: "finishSensor",
     render: { fillStyle: "#6a5acd" }
   });
-  Composite.add(engine.world, finishBar);
+  Composite.add(engine.world, finishSensor);
 
   courseBuilt = true;
-  startBtn.disabled = false;
+  if (startBtn) startBtn.disabled = false;
   setStatus("Course built. Press Start.");
 }
 
@@ -354,22 +346,21 @@ function spawnBalls(names) {
   const world = engine.world;
   balls = [];
 
-  // spawn grid near top
-  const startX = WORLD.width/2;
+  const startX = WORLD.width / 2;
   const startY = WORLD.startY;
 
-  const cols = 11; // 55 max = 5 rows
+  const cols = 11;
   const spacing = 26;
 
-  for (let i=0;i<names.length;i++) {
+  for (let i = 0; i < names.length; i++) {
     const col = i % cols;
     const row = Math.floor(i / cols);
     const hue = Math.floor((i * 360) / Math.max(1, names.length));
     const fill = `hsl(${hue} 90% 60%)`;
-    
+
     const b = Bodies.circle(
-      startX - ((cols-1)/2)*spacing + col*spacing,
-      startY - row*spacing,
+      startX - ((cols - 1) / 2) * spacing + col * spacing,
+      startY - row * spacing,
       13,
       {
         restitution: 0.25,
@@ -379,14 +370,22 @@ function spawnBalls(names) {
       }
     );
 
-    b.plugin = { idx: i+1, name: names[i] };
+    b.label = "ball";
+    b.plugin = { idx: i + 1, name: names[i], finished: false };
     balls.push(b);
   }
 
-  if (staggerEl.checked) {
+  if (staggerEl && staggerEl.checked) {
     let k = 0;
     const iv = setInterval(() => {
-      if (k >= balls.length) { clearInterval(iv); return; }
+      if (!engine || !engine.world) {
+        clearInterval(iv);
+        return;
+      }
+      if (k >= balls.length) {
+        clearInterval(iv);
+        return;
+      }
       Composite.add(world, balls[k]);
       k++;
     }, 120);
@@ -402,30 +401,29 @@ function setupCamera() {
     const viewW = canvas.width / (render.options.pixelRatio || 1);
     const viewH = canvas.height / (render.options.pixelRatio || 1);
 
-    // Follow leader (by greatest y)
     let targetY = WORLD.startY;
-    let targetX = WORLD.width/2;
+    let targetX = WORLD.width / 2;
 
     if (balls.length) {
-      let leader = balls[0];
+      let leader = null;
       for (const b of balls) {
-        if (b.position.y > leader.position.y) leader = b;
+        if (!leader || b.position.y > leader.position.y) leader = b;
       }
-      targetY = leader.position.y;
-      targetX = followLeaderEl.checked ? leader.position.x : WORLD.width/2;
+      if (leader) {
+        targetY = leader.position.y;
+        targetX = (followLeaderEl && followLeaderEl.checked) ? leader.position.x : WORLD.width / 2;
+      }
     }
 
-    // If we have at least one finisher, keep camera near the action but don’t jump to bottom instantly
-    if (finishers.length > 0 && followLeaderEl.checked) {
-      targetY = Math.max(targetY, finishers[finishers.length-1].position.y);
+    if (finishers.length > 0 && followLeaderEl && followLeaderEl.checked) {
+      targetY = Math.max(targetY, finishers[finishers.length - 1].position.y);
     }
 
-    // Clamp camera bounds
     const minX = 0, maxX = WORLD.width;
     const minY = 0, maxY = WORLD.height;
 
-    const bx0 = clamp(targetX - viewW/2, minX, maxX - viewW);
-    const by0 = clamp(targetY - viewH/2, minY, maxY - viewH);
+    const bx0 = clamp(targetX - viewW / 2, minX, maxX - viewW);
+    const by0 = clamp(targetY - viewH / 2, minY, maxY - viewH);
 
     render.bounds.min.x = bx0;
     render.bounds.min.y = by0;
@@ -436,31 +434,40 @@ function setupCamera() {
   });
 }
 
-function setupFinisherDetection() {
-  Events.on(engine, "afterUpdate", () => {
-    if (!balls.length) return;
+function setupFinishSensorDetection() {
+  Events.on(engine, "collisionStart", (evt) => {
+    if (!running) return;
+    if (!evt || !evt.pairs) return;
     if (finishers.length >= 5) return;
 
-    for (const b of balls) {
-      if (b.plugin && !b.plugin.finished && b.position.y >= WORLD.finishY + 40) {
-        b.plugin.finished = true;
-        finishers.push(b);
-        updateTop5UI();
+    for (const pair of evt.pairs) {
+      const a = pair.bodyA;
+      const b = pair.bodyB;
 
-        // Big win text + fireworks/confetti
-        celebrateFinisher(b, finishers.length);
+      const ball = (a.label === "ball") ? a : (b.label === "ball") ? b : null;
+      const sensor = (a.label === "finishSensor") ? a : (b.label === "finishSensor") ? b : null;
 
-        if (finishers.length === 5) {
-          setStatus("Top 5 decided! See scoreboard.");
-        }
+      if (!ball || !sensor) continue;
+      if (!ball.plugin || ball.plugin.finished) continue;
+
+      ball.plugin.finished = true;
+      finishers.push(ball);
+      updateTop5UI();
+      celebrateFinisher(ball, finishers.length);
+
+      if (finishers.length === 5) {
+        setStatus("Top 5 decided! See scoreboard.");
+        running = false;
+        setTimeout(() => showPanel(), 1200);
       }
     }
   });
 }
 
 function updateTop5UI() {
+  if (!top5El) return;
   top5El.innerHTML = "";
-  for (let i=0;i<finishers.length;i++) {
+  for (let i = 0; i < finishers.length; i++) {
     const b = finishers[i];
     const li = document.createElement("li");
     li.textContent = `#${b.plugin.idx} — ${b.plugin.name}`;
@@ -476,21 +483,17 @@ function celebrateFinisher(ball, rank) {
     untilMs: performance.now() + 2200
   };
 
-  // burst confetti near camera center
-  const cx = ball.position.x;
-  const cy = ball.position.y - 120;
-
-  spawnConfetti(cx, cy, 180 + rank*30);
+  spawnConfetti(ball.position.x, ball.position.y - 120, 180 + rank * 30);
 }
 
 function spawnConfetti(x, y, count) {
-  for (let i=0;i<count;i++) {
+  for (let i = 0; i < count; i++) {
     confetti.push({
       x, y,
-      vx: (Math.random()*8 - 4),
-      vy: (Math.random()*-10 - 3),
-      life: 140 + Math.random()*60,
-      r: 2 + Math.random()*3
+      vx: Math.random() * 8 - 4,
+      vy: Math.random() * -10 - 3,
+      life: 140 + Math.random() * 60,
+      r: 2 + Math.random() * 3
     });
   }
 }
@@ -499,7 +502,7 @@ function setupCustomOverlayDrawing() {
   Events.on(render, "afterRender", () => {
     const ctx = render.context;
 
-    // Ball labels
+    // Ball number labels
     for (const b of balls) {
       if (!b.plugin) continue;
       ctx.save();
@@ -515,28 +518,27 @@ function setupCustomOverlayDrawing() {
     // Confetti update/draw
     for (let i = confetti.length - 1; i >= 0; i--) {
       const p = confetti[i];
-      p.vy += 0.22; // gravity
+      p.vy += 0.22;
       p.x += p.vx;
       p.y += p.vy;
       p.life -= 1;
 
       ctx.save();
       ctx.globalAlpha = clamp(p.life / 120, 0, 1);
-      // no fixed colors: vary by using HSL via fillStyle string
       const hue = Math.floor((i * 13) % 360);
       ctx.fillStyle = `hsl(${hue} 90% 60%)`;
       ctx.beginPath();
-      ctx.arc(p.x, p.y, p.r, 0, Math.PI*2);
+      ctx.arc(p.x, p.y, p.r, 0, Math.PI * 2);
       ctx.fill();
       ctx.restore();
 
       if (p.life <= 0) confetti.splice(i, 1);
     }
 
-    // Big winner number overlay (screen space)
+    // Big winner overlay
     if (bigWinText && performance.now() < bigWinText.untilMs) {
       ctx.save();
-      ctx.setTransform(1,0,0,1,0,0);
+      ctx.setTransform(1, 0, 0, 1, 0, 0);
       ctx.fillStyle = "rgba(0,0,0,0.30)";
       ctx.fillRect(0, 0, canvas.clientWidth, canvas.clientHeight);
 
@@ -544,7 +546,7 @@ function setupCustomOverlayDrawing() {
       ctx.font = "900 140px system-ui, -apple-system, Segoe UI, Roboto, Arial";
       ctx.textAlign = "center";
       ctx.textBaseline = "middle";
-      ctx.fillText(bigWinText.text, canvas.clientWidth/2, canvas.clientHeight/2);
+      ctx.fillText(bigWinText.text, canvas.clientWidth / 2, canvas.clientHeight / 2);
       ctx.restore();
     } else if (bigWinText) {
       bigWinText = null;
@@ -553,68 +555,122 @@ function setupCustomOverlayDrawing() {
 }
 
 async function runCountdown() {
+  if (!countdownEl) return;
   countdownEl.classList.remove("hidden");
   const seq = ["3", "2", "1", "GO!"];
   for (const s of seq) {
     countdownEl.textContent = s;
-    await new Promise(r => setTimeout(r, 900));
+    await new Promise((r) => setTimeout(r, 900));
   }
   countdownEl.classList.add("hidden");
 }
 
 function tryPlayMusic() {
-  const url = musicUrlEl.value.trim();
+  const url = (musicUrlEl?.value || "").trim();
   if (url) music.src = url;
 
   if (!musicPlaying) {
     music.play().then(() => {
       musicPlaying = true;
-      musicBtn.textContent = "Pause";
+      if (musicBtn) musicBtn.textContent = "Pause";
     }).catch(() => {
       setStatus("Music blocked by browser until user interaction. Click Play again.");
     });
   } else {
     music.pause();
     musicPlaying = false;
-    musicBtn.textContent = "Play";
+    if (musicBtn) musicBtn.textContent = "Play";
   }
 }
 
+function shakeWorld() {
+  if (!engine || !balls.length) return;
+
+  const baseGx = engine.gravity.x || 0;
+  const baseGy = engine.gravity.y || 1;
+
+  const bursts = 14;
+  let step = 0;
+
+  const iv = setInterval(() => {
+    const s = (step % 2 === 0) ? 1 : -1;
+    engine.gravity.x = 0.35 * s;
+    engine.gravity.y = baseGy + 0.10 * (Math.random() * 2 - 1);
+
+    for (const b of balls) {
+      if (!b || b.isStatic) continue;
+      const fx = (Math.random() * 0.020 - 0.010) * b.mass;
+      const fy = (Math.random() * 0.016 - 0.022) * b.mass;
+      Body.applyForce(b, b.position, { x: fx, y: fy });
+    }
+
+    step++;
+    if (step >= bursts) {
+      clearInterval(iv);
+      if (engine) {
+        engine.gravity.x = baseGx;
+        engine.gravity.y = baseGy;
+      }
+    }
+  }, 55);
+}
+
 // --- UI wiring ---
-buildBtn.addEventListener("click", () => {
-  const names = parseNames();
-  if (!names.length) {
-    setStatus("Add at least 1 participant name.");
-    return;
-  }
-  buildCourse();
-});
+if (buildBtn) {
+  buildBtn.addEventListener("click", () => {
+    const names = parseNames();
+    if (!names.length) {
+      setStatus("Add at least 1 participant name.");
+      return;
+    }
+    buildCourse();
+  });
+}
 
-startBtn.addEventListener("click", async () => {
-  if (!courseBuilt) return;
+if (shakeBtn) {
+  shakeBtn.addEventListener("click", () => {
+    shakeWorld();
+  });
+}
 
-  const names = parseNames();
-  if (!names.length) { setStatus("Add at least 1 participant name."); return; }
+if (startBtn) {
+  startBtn.addEventListener("click", async () => {
+    if (!courseBuilt || running) return;
 
-  finishers = [];
-  updateTop5UI();
-  confetti = [];
-  bigWinText = null;
+    const names = parseNames();
+    if (!names.length) {
+      setStatus("Add at least 1 participant name.");
+      return;
+    }
 
-  setStatus(`Starting ${names.length} participants...`);
-  await runCountdown();
-  spawnBalls(names);
-  setStatus("Drop started. First 5 finishers win!");
-});
+    finishers = [];
+    confetti = [];
+    bigWinText = null;
+    updateTop5UI();
 
-resetBtn.addEventListener("click", () => {
-  clearWorld();
-  boot();
-});
+    setStatus(`Starting ${names.length} participants...`);
+    await runCountdown();
 
-musicBtn.addEventListener("click", () => {
-  tryPlayMusic();
-});
+    running = true;
+    hidePanel();
+    spawnBalls(names);
+
+    setStatus("Drop started. First 5 finishers win!");
+  });
+}
+
+if (resetBtn) {
+  resetBtn.addEventListener("click", () => {
+    clearWorld();
+    boot();
+  });
+}
+
+if (musicBtn) {
+  musicBtn.addEventListener("click", () => {
+    tryPlayMusic();
+  });
+}
 
 // Boot
 resizeCanvasToCSS();
