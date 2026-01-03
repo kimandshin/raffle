@@ -111,7 +111,15 @@ button:hover { background: rgba(255,255,255,0.13); }
   margin: 4px 0;
   font-size: 14px;
 }
+.panel {
+  transition: opacity 600ms ease, transform 600ms ease;
+}
 
+.panel.fadeout {
+  opacity: 0;
+  transform: translateY(-8px);
+  pointer-events: none;
+}
 .countdown {
   position: fixed;
   inset: 0;
