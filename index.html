@@ -7,10 +7,7 @@
   <link rel="stylesheet" href="style.css" />
 </head>
 <body>
-  <!-- IMPORTANT:
-       Your JS expects an element with id="panel" for fadeout.
-       Keep id="panel" (NOT "ui") unless you change app.js. -->
-  <div id="panel" class="ui">
+  <div id="ui">
     <div class="title">Ball Drop Raffle</div>
 
     <textarea id="names" rows="6" placeholder="One participant per line
@@ -18,19 +15,22 @@
 2. Bob
 3. Chris"></textarea>
 
-    <div class="row">
+    <div class="row row-build">
       <button id="buildBtn">Build Course</button>
       <button id="startBtn" disabled>Start</button>
+    </div>
+
+    <div class="row row-run">
       <button id="resetBtn">Reset</button>
       <button id="shakeBtn">Shake</button>
     </div>
 
-    <div class="row">
+    <div class="row row-options">
       <label class="chk"><input type="checkbox" id="stagger" checked /> Stagger release</label>
       <label class="chk"><input type="checkbox" id="followLeader" checked /> Follow leader</label>
     </div>
 
-    <div class="row">
+    <div class="row row-music">
       <input id="musicUrl" placeholder="Music URL (optional) e.g. assets/song.mp3" />
       <button id="musicBtn">Play</button>
     </div>
