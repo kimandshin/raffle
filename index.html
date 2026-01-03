@@ -7,7 +7,10 @@
   <link rel="stylesheet" href="style.css" />
 </head>
 <body>
-  <div id="ui">
+  <!-- IMPORTANT:
+       Your JS expects an element with id="panel" for fadeout.
+       Keep id="panel" (NOT "ui") unless you change app.js. -->
+  <div id="panel" class="ui">
     <div class="title">Ball Drop Raffle</div>
 
     <textarea id="names" rows="6" placeholder="One participant per line
