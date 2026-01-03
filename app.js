@@ -1,4 +1,13 @@
-const { Engine, Render, Runner, Bodies, Body, Composite, Events } = Matter;
+/* =========================================================
+   Ball Drop Raffle — FIXED (no trap ledges, real spinner, clean finish)
+   - ONE finish system (sensor collision only)
+   - NO long flat bars / ridges that trap balls
+   - Deflectors are short, steep, spaced out, low-friction
+   - Spinner is truly dynamic, pinned, and forced to keep spinning
+   - Camera clamping fixed (no bounds glitches)
+   ========================================================= */
+
+const { Engine, Render, Runner, Bodies, Body, Composite, Events, Constraint } = Matter;
 
 const canvas = document.getElementById("c");
 const panelEl = document.getElementById("ui");
@@ -28,17 +37,52 @@ let music = new Audio();
 music.loop = true;
 let musicPlaying = false;
 
+let confetti = [];
+let bigWinText = null;
+
 const WORLD = {
   width: 1100,
   height: 12000,
-  margin: 80,
   startY: 180,
   finishY: 11500
 };
 
-let twitchTimers = [];
-let confetti = [];
-let bigWinText = null;
+const COURSE = {
+  WALL_THICK: 80,
+
+  // Peg field near the top
+  PEG_R: 10,
+  PEG_MARGIN_X: 90,
+  PEG_TOP_Y: 140,
+  PEG_ROWS: 11,
+  PEG_COLS: 12,
+  PEG_ROW_GAP: 80,
+
+  // Deflectors (NO RIDGES)
+  DEFLECT_COUNT: 18,
+  DEFLECT_LEN_MIN: 70,
+  DEFLECT_LEN_MAX: 130,
+  DEFLECT_THICK: 14,
+  DEFLECT_ANGLE_MIN: 0.55, // ~31.5 deg (steeper)
+  DEFLECT_ANGLE_MAX: 1.10, // ~63 deg
+  DEFLECT_MIN_DIST: 220,   // spacing so two deflectors don’t create a pocket
+
+  // Finish sensor
+  FINISH_SENSOR_W_PAD: 160,
+  FINISH_SENSOR_H: 28,
+
+  // Spinner
+  SPINNER_Y: 5200,
+  SPINNER_HUB_R: 30,
+  SPINNER_SPOKE_LEN: 240,
+  SPINNER_SPOKE_THICK: 16,
+  SPINNER_SPOKES: 6,
+  SPINNER_TARGET_AV: 0.14, // target angular velocity (kept constant)
+};
+
+let spinnerRef = null;
+let keepSpinHandler = null;
+let finishCollisionHandler = null;
 
 function setStatus(msg) { statusEl.textContent = msg; }
 
@@ -47,6 +91,9 @@ function setPanelRunning(on) {
   if (on) panelEl.classList.add("running");
   else panelEl.classList.remove("running");
 }
+
+function clamp(v, a, b) { return Math.max(a, Math.min(b, v)); }
+function rand_(a, b) { return a + Math.random() * (b - a); }
 
 function resizeCanvasToCSS() {
   const dpr = Math.max(1, Math.min(2, window.devicePixelRatio || 1));
@@ -58,8 +105,6 @@ function resizeCanvasToCSS() {
     render.options.height = canvas.height;
   }
 }
-
-function clamp(v, a, b) { return Math.max(a, Math.min(b, v)); }
 
 function parseNames() {
   const lines = namesEl.value
@@ -75,11 +120,14 @@ function parseNames() {
   return names.slice(0, 55);
 }
 
+/* ---------- Engine / Renderer ---------- */
+
 function initEngine() {
   engine = Engine.create();
   engine.positionIterations = 10;
   engine.velocityIterations = 8;
   engine.gravity.y = 1.0;
+  engine.gravity.x = 0.0;
 
   render = Render.create({
     canvas,
@@ -106,7 +154,12 @@ function initEngine() {
 function clearWorld() {
   if (runner) Runner.stop(runner);
   if (render) Render.stop(render);
+
   if (engine) {
+    // remove event handlers safely
+    if (keepSpinHandler) Events.off(engine, "beforeUpdate", keepSpinHandler);
+    if (finishCollisionHandler) Events.off(engine, "collisionStart", finishCollisionHandler);
+
     Composite.clear(engine.world, false);
     Engine.clear(engine);
   }
@@ -115,11 +168,13 @@ function clearWorld() {
   finishers = [];
   confetti = [];
   bigWinText = null;
+
+  spinnerRef = null;
+  keepSpinHandler = null;
+  finishCollisionHandler = null;
+
   courseBuilt = false;
   isRunning = false;
-
-  for (const t of twitchTimers) clearInterval(t);
-  twitchTimers = [];
 
   top5El.innerHTML = "";
   startBtn.disabled = true;
@@ -131,255 +186,229 @@ function boot() {
   resizeCanvasToCSS();
   initEngine();
   setupCamera();
-  setupFinisherDetection();
   setupCustomOverlayDrawing();
   setStatus("Paste names → Build Course → Start");
 }
 
-function addWalls() {
-  const t = 80;
-  const left = Bodies.rectangle(-t / 2, WORLD.height / 2, t, WORLD.height + 2000, {
-    isStatic: true,
-    render: { fillStyle: "#1b1b22" }
-  });
-  const right = Bodies.rectangle(WORLD.width + t / 2, WORLD.height / 2, t, WORLD.height + 2000, {
-    isStatic: true,
-    render: { fillStyle: "#1b1b22" }
-  });
-  Composite.add(engine.world, [left, right]);
+/* ---------- Course Pieces (NO TRAPS) ---------- */
+
+function addWalls_(world, W, H) {
+  const t = COURSE.WALL_THICK;
+  const walls = [
+    Bodies.rectangle(W / 2, -t / 2, W + t * 2, t, { isStatic: true, render: { visible: false } }),
+    Bodies.rectangle(W / 2, H + t / 2, W + t * 2, t, { isStatic: true, render: { visible: false } }),
+    Bodies.rectangle(-t / 2, H / 2, t, H + t * 2, { isStatic: true, render: { visible: false } }),
+    Bodies.rectangle(W + t / 2, H / 2, t, H + t * 2, { isStatic: true, render: { visible: false } }),
+  ];
+  Composite.add(world, walls);
+  return walls;
 }
 
-function addSlope(x, y, w, h, deg, style = "#2a2a36") {
-  const angle = deg * Math.PI / 180;
-  const body = Bodies.rectangle(x, y, w, h, {
-    isStatic: true,
-    angle,
-    render: { fillStyle: style }
-  });
-  Composite.add(engine.world, body);
-  return body;
-}
+function addPegField_(world, W) {
+  const pegs = [];
+  const marginX = COURSE.PEG_MARGIN_X;
 
-function addBumper(x, y, r = 18, style = "#3a3a4a") {
-  const b = Bodies.circle(x, y, r, {
-    isStatic: true,
-    render: { fillStyle: style }
-  });
-  Composite.add(engine.world, b);
-  return b;
-}
+  const cols = COURSE.PEG_COLS;
+  const usableW = Math.max(200, W - marginX * 2);
+  const colGap = usableW / (cols - 1);
 
-function addSpinner(x, y, radius = 85, spokeCount = 10) {
-  const hub = Bodies.circle(x, y, radius, {
-    isStatic: true,
-    render: { fillStyle: "#1c1c28" }
-  });
+  const rows = COURSE.PEG_ROWS;
+  const rowGap = COURSE.PEG_ROW_GAP;
+  let y = COURSE.PEG_TOP_Y;
 
-  const spokes = [];
-  const spokeLen = radius * 2.8;
-  const spokeThk = 22;
+  for (let r = 0; r < rows; r++) {
+    const offset = (r % 2 === 0) ? 0 : colGap / 2;
+    for (let c = 0; c < cols; c++) {
+      let x = marginX + c * colGap + offset;
+      x = clamp(x, COURSE.PEG_R + 20, W - COURSE.PEG_R - 20);
 
-  for (let i = 0; i < spokeCount; i++) {
-    const spoke = Bodies.rectangle(x, y, spokeLen, spokeThk, {
-      isStatic: true,
-      angle: (Math.PI * 2 * i) / spokeCount,
-      render: { fillStyle: "#4a4a66" }
-    });
-    spokes.push(spoke);
-  }
-
-  Composite.add(engine.world, [hub, ...spokes]);
-  return { hub, spokes };
-}
-
-function spinConstant(spinner, angularSpeed) {
-  Events.on(engine, "beforeUpdate", () => {
-    Body.rotate(spinner.hub, angularSpeed);
-    for (const s of spinner.spokes) Body.rotate(s, angularSpeed);
-  });
-}
-
-function twitchEvery(spinner, ms = 2000) {
-  const t = setInterval(() => {
-    const amt = (Math.random() * 0.9 + 0.25) * (Math.random() < 0.5 ? -1 : 1);
-    Body.rotate(spinner.hub, amt);
-    for (const s of spinner.spokes) Body.rotate(s, amt);
-  }, ms);
-  twitchTimers.push(t);
-}
-
-function addTwitchStick(x, y, w = 560, h = 18) {
-  const stick = Bodies.rectangle(x, y, w, h, {
-    isStatic: true,
-    angle: 0,
-    render: { fillStyle: "#40405a" }
-  });
-  Composite.add(engine.world, stick);
-
-  const t = setInterval(() => {
-    const a = (Math.random() * 1.25 + 0.55) * (Math.random() < 0.5 ? -1 : 1);
-    Body.rotate(stick, a);
-    setTimeout(() => Body.rotate(stick, -a * 0.95), 90);
-  }, 1200);
-
-  twitchTimers.push(t);
-  return stick;
-}
-
-function addGateBottleneck(y, gapWidth = 170) {
-  const plateLen = 520;
-  const plateThk = 18;
-
-  addSlope((WORLD.width / 2) - 260, y - 120, plateLen, plateThk, 30, "#2a2a36");
-  addSlope((WORLD.width / 2) + 260, y - 120, plateLen, plateThk, -30, "#2a2a36");
-
-  const wallThk = 30;
-  const wallH = 260;
-  const leftX = (WORLD.width - gapWidth) / 2 - wallThk / 2;
-  const rightX = (WORLD.width + gapWidth) / 2 + wallThk / 2;
-
-  const leftWall = Bodies.rectangle(leftX, y + 60, wallThk, wallH, {
-    isStatic: true, render: { fillStyle: "#2a2a36" }
-  });
-  const rightWall = Bodies.rectangle(rightX, y + 60, wallThk, wallH, {
-    isStatic: true, render: { fillStyle: "#2a2a36" }
-  });
-
-  Composite.add(engine.world, [leftWall, rightWall]);
-
-  for (let i = 0; i < 7; i++) addBumper(170 + i * 130, y + 260, 14);
-}
-
-/* --- FIX: Edge lanes get obstacles + inward “kickers” so nobody free-falls --- */
-function addEdgeKickers(y0, y1, step = 650) {
-  const thk = 18;
-  const len = 360;
-  const inset = 110;
-
-  let flip = false;
-  for (let y = y0; y <= y1; y += step) {
-    // left side kicks inward (down-right)
-    addSlope(inset, y, len, thk, flip ? 42 : 35, "#242432");
-    // right side kicks inward (down-left)
-    addSlope(WORLD.width - inset, y + step / 2, len, thk, flip ? -42 : -35, "#242432");
-    flip = !flip;
-  }
-}
-
-function addPegField(y0, y1, x0, x1, dx, dy, r) {
-  let row = 0;
-  for (let y = y0; y <= y1; y += dy) {
-    const offset = (row % 2) ? dx / 2 : 0;
-    for (let x = x0; x <= x1; x += dx) {
-      addBumper(x + offset, y, r);
+      const peg = Bodies.circle(x, y, COURSE.PEG_R, {
+        isStatic: true,
+        restitution: 0.15,
+        friction: 0.15,
+        render: { fillStyle: "#2a2f3a" }
+      });
+      pegs.push(peg);
     }
-    row++;
+    y += rowGap;
   }
+
+  Composite.add(world, pegs);
+  return pegs;
 }
 
-function buildCourse() {
-  clearWorld();
-  resizeCanvasToCSS();
-  initEngine();
-  setupCamera();
-  setupFinisherDetection();
-  setupCustomOverlayDrawing();
+function tooClose_(x, y, placed) {
+  const minD2 = COURSE.DEFLECT_MIN_DIST * COURSE.DEFLECT_MIN_DIST;
+  for (const p of placed) {
+    const dx = x - p.x;
+    const dy = y - p.y;
+    if (dx * dx + dy * dy < minD2) return true;
+  }
+  return false;
+}
 
-  addWalls();
+function addShortDeflectors_(world, W, H) {
+  const deflectors = [];
+  const placed = [];
 
-  /* --- START SECTION (FIX: no V-bowl trap) --- */
-  // A narrow chute so everything enters the obstacle field, not the edges.
-  const chuteW = 520;
-  const wallThk = 26;
-  const chuteLeft = (WORLD.width - chuteW) / 2;
-  const chuteRight = (WORLD.width + chuteW) / 2;
+  const top = COURSE.PEG_TOP_Y + COURSE.PEG_ROW_GAP * 1.2;
+  const bottom = WORLD.finishY - 420;
 
-  Composite.add(engine.world, [
-    Bodies.rectangle(chuteLeft - wallThk / 2, 420, wallThk, 640, { isStatic: true, render: { fillStyle: "#2a2a36" } }),
-    Bodies.rectangle(chuteRight + wallThk / 2, 420, wallThk, 640, { isStatic: true, render: { fillStyle: "#2a2a36" } })
-  ]);
+  let tries = 0;
+  while (deflectors.length < COURSE.DEFLECT_COUNT && tries < 600) {
+    tries++;
 
-  // One strong ramp + a small kicker peg
-  addSlope(WORLD.width / 2, 640, 720, 18, 38, "#2a2a36");
-  addBumper(WORLD.width / 2 + 90, 770, 16);
+    const len = rand_(COURSE.DEFLECT_LEN_MIN, COURSE.DEFLECT_LEN_MAX);
+    const thick = COURSE.DEFLECT_THICK;
 
-  /* --- FIX: prevent edge free-fall everywhere --- */
-  addEdgeKickers(1100, 10200, 720);
+    const x = rand_(140, W - 140);
+    const y = rand_(top, bottom);
 
-  // Wide peg field (covers almost full width)
-  addPegField(
-    980, 2300,
-    WORLD.margin + 90, WORLD.width - WORLD.margin - 90,
-    130, 150, 13
-  );
+    if (tooClose_(x, y, placed)) continue;
 
-  // 45° long slide + spinner
-  addSlope(560, 2600, 900, 18, 45);
-  const s1 = addSpinner(520, 3000, 95, 7);
-  spinConstant(s1, 0.06);
+    const sign = Math.random() < 0.5 ? -1 : 1;
+    const angle = sign * rand_(COURSE.DEFLECT_ANGLE_MIN, COURSE.DEFLECT_ANGLE_MAX);
 
-  // More pegs (again, wide)
-  addPegField(
-    3300, 4700,
-    WORLD.margin + 80, WORLD.width - WORLD.margin - 80,
-    140, 160, 12
-  );
+    const bar = Bodies.rectangle(x, y, len, thick, {
+      isStatic: true,
+      angle,
+      restitution: 0.05,
+      friction: 0.12,     // low friction = no “resting” on ledges
+      frictionStatic: 0.0,
+      render: { fillStyle: "#1d2230" }
+    });
 
-  // Bottleneck #1
-  addGateBottleneck(5200, 170);
-  addTwitchStick(560, 5600, 560, 18);
-
-  // 30° slow drama
-  addSlope(540, 6100, 980, 18, 30);
-
-  // Separators across width (not just center)
-  for (let i = 0; i < 10; i++) {
-    const x = WORLD.margin + 140 + i * 95;
-    const y = 6650 + i * 95;
-    addSlope(x, y, 220, 14, i % 2 === 0 ? 30 : -30, "#2d2d3d");
+    deflectors.push(bar);
+    placed.push({ x, y });
   }
 
-  // Spinner field spread (left/center/right)
-  const s2 = addSpinner(260, 7700, 85, 6);
-  spinConstant(s2, -0.07);
-  const s3 = addSpinner(560, 7900, 95, 6);
-  spinConstant(s3, 0.06);
-  const s4 = addSpinner(860, 7700, 85, 6);
-  spinConstant(s4, 0.07);
-  twitchEvery(s3, 1900);
+  Composite.add(world, deflectors);
+  return deflectors;
+}
 
-  // Bottleneck #2
-  addGateBottleneck(8800, 160);
-  addTwitchStick(560, 9300, 560, 18);
+function addSpinnerInPath_(world, W) {
+  const cx = W * 0.5;
+  const cy = COURSE.SPINNER_Y;
 
-  // Chaos canyon (FULL WIDTH)
-  addPegField(
-    9600, 10850,
-    WORLD.margin + 70, WORLD.width - WORLD.margin - 70,
-    120, 135, 12
-  );
+  const hub = Bodies.circle(cx, cy, COURSE.SPINNER_HUB_R, {
+    frictionAir: 0.02,
+    render: { fillStyle: "#2a2f3a" }
+  });
 
-  // Final redirect slopes (push toward center, no “catch tray”)
-  addSlope(320, 11180, 680, 18, 35);
-  addSlope(780, 11180, 680, 18, -35);
+  const parts = [hub];
+  for (let i = 0; i < COURSE.SPINNER_SPOKES; i++) {
+    const a = (Math.PI * 2 * i) / COURSE.SPINNER_SPOKES;
+    const spoke = Bodies.rectangle(cx, cy, COURSE.SPINNER_SPOKE_LEN, COURSE.SPINNER_SPOKE_THICK, {
+      angle: a,
+      render: { fillStyle: "#2a2f3a" }
+    });
+    parts.push(spoke);
+  }
 
-  // --- FINISH SENSOR (FIX: it must NEVER catch balls) ---
-  const finishSensor = Bodies.rectangle(WORLD.width / 2, WORLD.finishY, WORLD.width - 160, 16, {
+  const spinner = Body.create({ parts, frictionAir: 0.02 });
+  Body.setAngularVelocity(spinner, COURSE.SPINNER_TARGET_AV);
+
+  const pin = Constraint.create({
+    pointA: { x: cx, y: cy },
+    bodyB: spinner,
+    pointB: { x: 0, y: 0 },
+    stiffness: 1,
+    length: 0
+  });
+
+  Composite.add(world, [spinner, pin]);
+
+  // Keep it spinning (Matter will otherwise slow it down)
+  keepSpinHandler = () => {
+    if (!spinnerRef) return;
+    Body.setAngularVelocity(spinnerRef, COURSE.SPINNER_TARGET_AV);
+  };
+  Events.on(engine, "beforeUpdate", keepSpinHandler);
+
+  spinnerRef = spinner;
+  return spinner;
+}
+
+function addFinishSensor_(world, W) {
+  const sensor = Bodies.rectangle(W / 2, WORLD.finishY, W - COURSE.FINISH_SENSOR_W_PAD, COURSE.FINISH_SENSOR_H, {
     isStatic: true,
     isSensor: true,
-    collisionFilter: { category: 0x0002, mask: 0x0000 },
-    render: { fillStyle: "#6a5acd" }
+    label: "finishSensor",
+    render: { fillStyle: "rgba(120,100,255,0.35)" }
   });
-  Composite.add(engine.world, finishSensor);
 
-  // A “drain” below the finish so balls don’t accumulate
-  addSlope(220, WORLD.finishY + 260, 700, 18, -35, "#222233");
-  addSlope(880, WORLD.finishY + 260, 700, 18, 35, "#222233");
+  // Hidden floor far below
+  const floor = Bodies.rectangle(W / 2, WORLD.height + 240, W + 600, 120, {
+    isStatic: true,
+    render: { visible: false }
+  });
+
+  Composite.add(world, [sensor, floor]);
+
+  finishCollisionHandler = (evt) => {
+    for (const pair of evt.pairs) {
+      const a = pair.bodyA;
+      const b = pair.bodyB;
+
+      const hitSensor = (a.label === "finishSensor" || b.label === "finishSensor");
+      if (!hitSensor) continue;
+
+      const ball = (a.label === "ball") ? a : (b.label === "ball") ? b : null;
+      if (!ball || !ball.plugin || ball.plugin.removed || ball.plugin.finished) continue;
+
+      ball.plugin.finished = true;
+
+      if (finishers.length < 5) {
+        finishers.push({ idx: ball.plugin.idx, name: ball.plugin.name, y: ball.position.y });
+        updateTop5UI();
+        celebrateFinisher(ball, finishers.length);
+        if (finishers.length === 5) setStatus("Top 5 decided! See scoreboard.");
+      }
+
+      setTimeout(() => removeBallFromWorld_(ball), 200);
+    }
+  };
+
+  Events.on(engine, "collisionStart", finishCollisionHandler);
+  return sensor;
+}
+
+/* ---------- Build Course ---------- */
+
+function buildCourseFixed_() {
+  const world = engine.world;
+  const W = WORLD.width;
+  const H = WORLD.height;
+
+  // Clear world bodies only (don’t nuke engine/render)
+  Composite.clear(world, false);
+
+  // Remove old handlers if rebuilding
+  if (keepSpinHandler) Events.off(engine, "beforeUpdate", keepSpinHandler);
+  if (finishCollisionHandler) Events.off(engine, "collisionStart", finishCollisionHandler);
+  keepSpinHandler = null;
+  finishCollisionHandler = null;
+  spinnerRef = null;
+
+  addWalls_(world, W, H);
+  addPegField_(world, W);
+  addShortDeflectors_(world, W, H);
+  addSpinnerInPath_(world, W);
+  addFinishSensor_(world, W);
+
+  engine.gravity.y = 1.0;
+  engine.gravity.x = 0.0;
 
   courseBuilt = true;
   startBtn.disabled = false;
-  setStatus("Course built. Press Start.");
+  setStatus("Course built. Click Start.");
 }
+
+function buildCourse() {
+  buildCourseFixed_();
+}
+
+/* ---------- Balls ---------- */
 
 function spawnBalls(names) {
   const world = engine.world;
@@ -402,9 +431,10 @@ function spawnBalls(names) {
       startY - row * spacing,
       13,
       {
+        label: "ball",
         restitution: 0.25,
-        friction: 0.03,
-        frictionAir: 0.018,
+        friction: 0.02,
+        frictionAir: 0.016,
         render: { fillStyle: fill }
       }
     );
@@ -425,7 +455,8 @@ function spawnBalls(names) {
   }
 }
 
-/* --- SHAKE (manual unstuck) --- */
+/* ---------- Shake ---------- */
+
 function shakeWorld() {
   if (!engine || !balls.length) return;
 
@@ -437,13 +468,13 @@ function shakeWorld() {
 
   const iv = setInterval(() => {
     const s = (step % 2 === 0) ? 1 : -1;
-    engine.gravity.x = 0.40 * s;
-    engine.gravity.y = baseGy + 0.12 * (Math.random() * 2 - 1);
+    engine.gravity.x = 0.38 * s;
+    engine.gravity.y = baseGy + 0.10 * (Math.random() * 2 - 1);
 
     for (const b of balls) {
       if (!b || b.isStatic || (b.plugin && b.plugin.removed)) continue;
-      const fx = (Math.random() * 0.022 - 0.011) * b.mass;
-      const fy = (Math.random() * 0.016 - 0.024) * b.mass;
+      const fx = (Math.random() * 0.020 - 0.010) * b.mass;
+      const fy = (Math.random() * 0.015 - 0.020) * b.mass;
       Body.applyForce(b, b.position, { x: fx, y: fy });
     }
 
@@ -456,18 +487,19 @@ function shakeWorld() {
   }, 55);
 }
 
-/* --- CAMERA --- */
+/* ---------- Camera (FIXED clamp) ---------- */
+
 function setupCamera() {
   Events.on(engine, "afterUpdate", () => {
     if (!render) return;
 
-    const viewW = canvas.width / (render.options.pixelRatio || 1);
-    const viewH = canvas.height / (render.options.pixelRatio || 1);
+    const pr = (render.options.pixelRatio || 1);
+    const viewW = canvas.width / pr;
+    const viewH = canvas.height / pr;
 
     let targetY = WORLD.startY;
     let targetX = WORLD.width / 2;
 
-    // leader = greatest y among active (not removed) balls
     if (balls.length) {
       let leader = null;
       for (const b of balls) {
@@ -488,8 +520,11 @@ function setupCamera() {
     const minX = 0, maxX = WORLD.width;
     const minY = 0, maxY = WORLD.height;
 
-    const bx0 = clamp(targetX - viewW / 2, minX, maxX - viewW);
-    const by0 = clamp(targetY - viewH / 2, minY, maxY - viewH);
+    const maxBX = Math.max(minX, maxX - viewW);
+    const maxBY = Math.max(minY, maxY - viewH);
+
+    const bx0 = clamp(targetX - viewW / 2, minX, maxBX);
+    const by0 = clamp(targetY - viewH / 2, minY, maxBY);
 
     render.bounds.min.x = bx0;
     render.bounds.min.y = by0;
@@ -500,41 +535,12 @@ function setupCamera() {
   });
 }
 
-/* --- FINISH DETECTION (FIX: remove balls so finish doesn’t pile up) --- */
+/* ---------- Finishers UI / Removal ---------- */
+
 function removeBallFromWorld_(b) {
   if (!b || (b.plugin && b.plugin.removed)) return;
   Composite.remove(engine.world, b);
   if (b.plugin) b.plugin.removed = true;
-}
-
-function setupFinisherDetection() {
-  Events.on(engine, "afterUpdate", () => {
-    if (!balls.length) return;
-
-    for (const b of balls) {
-      if (!b || !b.plugin || b.plugin.removed) continue;
-
-      // Record finishers
-      if (!b.plugin.finished && b.position.y >= WORLD.finishY + 40) {
-        b.plugin.finished = true;
-
-        if (finishers.length < 5) {
-          finishers.push({ idx: b.plugin.idx, name: b.plugin.name, y: b.position.y });
-          updateTop5UI();
-          celebrateFinisher(b, finishers.length);
-          if (finishers.length === 5) setStatus("Top 5 decided! See scoreboard.");
-        }
-
-        // Remove to prevent end pileups
-        setTimeout(() => removeBallFromWorld_(b), 400);
-      }
-
-      // Safety: if any ball goes way below, delete it
-      if (b.position.y >= WORLD.finishY + 1500) {
-        removeBallFromWorld_(b);
-      }
-    }
-  });
 }
 
 function updateTop5UI() {
@@ -547,7 +553,8 @@ function updateTop5UI() {
   }
 }
 
-/* --- CONFETTI / OVERLAY --- */
+/* ---------- Confetti / Overlay ---------- */
+
 function celebrateFinisher(ball, rank) {
   ball.render.fillStyle = "#ffd54a";
   bigWinText = { text: `#${ball.plugin.idx}`, untilMs: performance.now() + 1700 };
@@ -622,6 +629,8 @@ function setupCustomOverlayDrawing() {
   });
 }
 
+/* ---------- Countdown / Music ---------- */
+
 async function runCountdown() {
   countdownEl.classList.remove("hidden");
   const seq = ["3", "2", "1", "GO!"];
@@ -650,7 +659,8 @@ function tryPlayMusic() {
   }
 }
 
-/* --- UI wiring --- */
+/* ---------- UI wiring ---------- */
+
 buildBtn.addEventListener("click", () => {
   const names = parseNames();
   if (!names.length) { setStatus("Add at least 1 participant name."); return; }
@@ -691,6 +701,6 @@ musicBtn.addEventListener("click", () => {
   tryPlayMusic();
 });
 
-/* --- Boot --- */
+/* ---------- Boot ---------- */
 resizeCanvasToCSS();
 boot();
