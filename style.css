@@ -133,3 +133,36 @@ button:hover { background: rgba(255,255,255,0.13); }
 }
 
 .hidden { display: none; }
+
+/* Panel collapse during run (keeps Reset/Shake + Top5 visible) */
+#ui {
+  transition: opacity 250ms ease, transform 250ms ease, max-height 250ms ease;
+}
+
+#ui.running .row-build,
+#ui.running .row-options,
+#ui.running .row-music,
+#ui.running #names {
+  opacity: 0;
+  transform: translateY(-6px);
+  max-height: 0;
+  overflow: hidden;
+  pointer-events: none;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+
+#ui.running .title {
+  opacity: 0.85;
+}
+
+/* Make sure the run controls stay usable */
+#ui .row-run {
+  gap: 10px;
+}
+
+/* Optional: make Shake more noticeable */
+#shakeBtn {
+  font-weight: 700;
+}
