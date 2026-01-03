@@ -19,6 +19,7 @@ let engine, runner, render;
 let balls = [];
 let finishers = []; // store ball objects in order
 let courseBuilt = false;
+let resizeHandlerBound = false;
 
 let music = new Audio();
 music.loop = true;
@@ -72,6 +73,8 @@ function parseNames() {
 
 function initEngine() {
   engine = Engine.create();
+  engine.positionIterations = 10;
+  engine.velocityIterations = 8;
   engine.gravity.y = 1.0;
 
   render = Render.create({
@@ -90,11 +93,27 @@ function initEngine() {
   Runner.run(runner, engine);
   Render.run(render);
 
+  if (!resizeHandlerBound) {
   window.addEventListener("resize", () => resizeCanvasToCSS());
+  resizeHandlerBound = true;
+}
 }
 
 function clearWorld() {
-  if (!engine) return;
+  if (!engine) {
+  balls = [];
+  finishers = [];
+  courseBuilt = false;
+  confetti = [];
+  bigWinText = null;
+  for (const t of twitchTimers) clearInterval(t);
+  twitchTimers = [];
+  top5El.innerHTML = "";
+  startBtn.disabled = true;
+  return;
+}
+  if (runner) Runner.stop(runner);
+  if (render) Render.stop(render);
   Composite.clear(engine.world, false);
   Engine.clear(engine);
   balls = [];
@@ -150,30 +169,50 @@ function addBumper(x, y, r=18) {
   return b;
 }
 
-function addGateBottleneck(y, gapWidth=160) {
-  // Two lanes funnel: walls squeeze into a narrow gap
-  const w = (WORLD.width - gapWidth) / 2;
-  const left = Bodies.rectangle(w/2, y, w, 30, { isStatic: true, render:{fillStyle:"#2a2a36"} });
-  const right = Bodies.rectangle(WORLD.width - w/2, y, w, 30, { isStatic: true, render:{fillStyle:"#2a2a36"} });
-  Composite.add(engine.world, [left, right]);
+function addGateBottleneck(y, gapWidth=170) {
+  // Two-lane funnel using angled plates (>= 30°)
+  const plateLen = 520;
+  const plateThk = 18;
 
-  // Add a few bumpers right after the gate to separate balls
-  for (let i = 0; i < 6; i++) addBumper(200 + i*140, y + 180, 14);
+  // Left plate slopes down-right at +30°
+  addSlope((WORLD.width/2) - 260, y - 120, plateLen, plateThk, 30, "#2a2a36");
+  // Right plate slopes down-left at -30°
+  addSlope((WORLD.width/2) + 260, y - 120, plateLen, plateThk, -30, "#2a2a36");
+
+  // Create narrow "gate" using vertical walls (not a flat surface)
+  const wallThk = 30;
+  const wallH = 260;
+  const leftX = (WORLD.width - gapWidth)/2 - wallThk/2;
+  const rightX = (WORLD.width + gapWidth)/2 + wallThk/2;
+
+  const leftWall = Bodies.rectangle(leftX, y + 60, wallThk, wallH, {
+    isStatic: true, render: { fillStyle: "#2a2a36" }
+  });
+  const rightWall = Bodies.rectangle(rightX, y + 60, wallThk, wallH, {
+    isStatic: true, render: { fillStyle: "#2a2a36" }
+  });
+
+  Composite.add(engine.world, [leftWall, rightWall]);
+
+  // De-clump bumpers after gate
+  for (let i = 0; i < 7; i++) addBumper(170 + i*130, y + 260, 14);
 }
 
-function addSpinner(x, y, radius=85, spokeCount=6) {
-  // Static wheel center; rotating "paddles" are separate static bodies we rotate manually
+function addSpinner(x, y, radius=85, spokeCount=10) {
   const hub = Bodies.circle(x, y, radius, {
     isStatic: true,
-    render: { fillStyle: "#242432" }
+    render: { fillStyle: "#1c1c28" }
   });
 
   const spokes = [];
+  const spokeLen = radius * 2.8;  // LONG
+  const spokeThk = 22;           // THICK
+
   for (let i=0;i<spokeCount;i++) {
-    const spoke = Bodies.rectangle(x, y, radius*1.7, 14, {
+    const spoke = Bodies.rectangle(x, y, spokeLen, spokeThk, {
       isStatic: true,
       angle: (Math.PI*2*i)/spokeCount,
-      render: { fillStyle: "#3b3b52" }
+      render: { fillStyle: "#4a4a66" }
     });
     spokes.push(spoke);
   }
@@ -199,7 +238,7 @@ function twitchEvery(spinner, ms=2000) {
   twitchTimers.push(t);
 }
 
-function addTwitchStick(x, y, w=220, h=18) {
+function addTwitchStick(x, y, w=560, h=18) {
   const stick = Bodies.rectangle(x, y, w, h, {
     isStatic: true,
     angle: 0,
@@ -207,21 +246,22 @@ function addTwitchStick(x, y, w=220, h=18) {
   });
   Composite.add(engine.world, stick);
 
-  // Twitch motion every ~2s + small random jitter between
   const t = setInterval(() => {
-    const a = (Math.random() * 1.0 + 0.35) * (Math.random() < 0.5 ? -1 : 1);
+    // Bigger twitch
+    const a = (Math.random() * 1.25 + 0.55) * (Math.random() < 0.5 ? -1 : 1);
     Body.rotate(stick, a);
 
-    // Also "flick up" by briefly rotating back quickly
-    setTimeout(() => Body.rotate(stick, -a*0.8), 110);
-  }, 2000);
-  twitchTimers.push(t);
+    // Snap-back flick (creates upward impulses)
+    setTimeout(() => Body.rotate(stick, -a * 0.95), 90);
+  }, 1200);
 
+  twitchTimers.push(t);
   return stick;
 }
 
 function buildCourse() {
   clearWorld();
+  resizeCanvasToCSS();
   initEngine();
   setupCamera();
   setupFinisherDetection();
@@ -233,7 +273,8 @@ function buildCourse() {
   // Mostly vertical with some 45° and a couple 30° sections.
 
   // Start funnel
-  addSlope(WORLD.width/2, 220, 780, 24, 0);
+  addSlope(320, 250, 780, 18, 30);
+  addSlope(780, 250, 780, 18, -30);
   addSlope(260, 420, 520, 18, 45);
   addSlope(840, 520, 520, 18, -45);
 
@@ -253,14 +294,14 @@ function buildCourse() {
   addGateBottleneck(3000, 170);
 
   // Twitch stick after gate (flick up)
-  addTwitchStick(560, 3320, 260, 18);
+  addTwitchStick(560, 3320, 560, 18);
 
   // 30° shallow section (slower)
   addSlope(540, 3800, 980, 18, 30);
 
   // “Separators” – small alternating ramps
   for (let i = 0; i < 8; i++) {
-    addSlope(240 + i*95, 4300 + i*90, 180, 14, i%2===0 ? 25 : -25, "#2d2d3d");
+    addSlope(240 + i*95, 4300 + i*90, 180, 14, i%2===0 ? 30 : -30, "#2d2d3d");
   }
 
   // Spinner field (slows + spreads)
@@ -282,7 +323,7 @@ function buildCourse() {
   addSlope(560, 7700, 900, 18, 45);
 
   // Another twitch stick to de-clump
-  addTwitchStick(560, 8200, 320, 18);
+  addTwitchStick(560, 8200, 560, 18);
 
   // Long “chaos canyon” bumpers
   for (let y = 8600; y <= 9900; y += 120) {
@@ -299,6 +340,7 @@ function buildCourse() {
   // Finish line visual bar
   const finishBar = Bodies.rectangle(WORLD.width/2, WORLD.finishY, WORLD.width - 180, 20, {
     isStatic: true,
+    isSensor: true,
     render: { fillStyle: "#6a5acd" }
   });
   Composite.add(engine.world, finishBar);
@@ -322,7 +364,9 @@ function spawnBalls(names) {
   for (let i=0;i<names.length;i++) {
     const col = i % cols;
     const row = Math.floor(i / cols);
-
+    const hue = Math.floor((i * 360) / Math.max(1, names.length));
+    const fill = `hsl(${hue} 90% 60%)`;
+    
     const b = Bodies.circle(
       startX - ((cols-1)/2)*spacing + col*spacing,
       startY - row*spacing,
@@ -330,8 +374,8 @@ function spawnBalls(names) {
       {
         restitution: 0.25,
         friction: 0.03,
-        frictionAir: 0.018,  // slows down to hit 30+ seconds
-        render: { fillStyle: "#f2f2f7" }
+        frictionAir: 0.018,
+        render: { fillStyle: fill }
       }
     );
 
