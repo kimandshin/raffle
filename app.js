@@ -1,13 +1,20 @@
-/* =========================================================
-   Ball Drop Raffle — FIXED (no trap ledges, real spinner, clean finish)
-   - ONE finish system (sensor collision only)
-   - NO long flat bars / ridges that trap balls
-   - Deflectors are short, steep, spaced out, low-friction
-   - Spinner is truly dynamic, pinned, and forced to keep spinning
-   - Camera clamping fixed (no bounds glitches)
-   ========================================================= */
+/* Ball Drop Raffle — FIXED (no edge free-falls, single finish system, world-size course)
+   Requires: Matter.js loaded, and these elements exist:
+   #c, #ui, #names, #buildBtn, #startBtn, #resetBtn, #shakeBtn,
+   #stagger, #followLeader, #status, #countdown, #top5, #musicUrl, #musicBtn
+*/
 
-const { Engine, Render, Runner, Bodies, Body, Composite, Events, Constraint } = Matter;
+const {
+  Engine,
+  Render,
+  Runner,
+  Bodies,
+  Body,
+  Composite,
+  Events,
+  World,
+  Constraint
+} = Matter;
 
 const canvas = document.getElementById("c");
 const panelEl = document.getElementById("ui");
@@ -27,6 +34,7 @@ const musicUrlEl = document.getElementById("musicUrl");
 const musicBtn = document.getElementById("musicBtn");
 
 let engine, runner, render;
+
 let balls = [];
 let finishers = [];
 let courseBuilt = false;
@@ -40,51 +48,61 @@ let musicPlaying = false;
 let confetti = [];
 let bigWinText = null;
 
-const WORLD = {
+const WORLD_CFG = {
   width: 1100,
   height: 12000,
+  margin: 80,
   startY: 180,
   finishY: 11500
 };
 
 const COURSE = {
-  WALL_THICK: 80,
+  wallThick: 80,
 
-  // Peg field near the top
-  PEG_R: 10,
-  PEG_MARGIN_X: 90,
-  PEG_TOP_Y: 140,
-  PEG_ROWS: 11,
-  PEG_COLS: 12,
-  PEG_ROW_GAP: 80,
+  // PEGS: fill the ENTIRE height (fixes empty edge/straight-fall lanes)
+  pegR: 10,
+  pegMarginX: 70,          // tighter to cover edges
+  pegTopY: 140,
+  pegBottomPad: 420,       // stop before finish zone
+  pegRowsGap: 120,         // vertical spacing between peg rows
+  pegCols: 13,             // more columns => better width coverage
 
-  // Deflectors (NO RIDGES)
-  DEFLECT_COUNT: 18,
-  DEFLECT_LEN_MIN: 70,
-  DEFLECT_LEN_MAX: 130,
-  DEFLECT_THICK: 14,
-  DEFLECT_ANGLE_MIN: 0.55, // ~31.5 deg (steeper)
-  DEFLECT_ANGLE_MAX: 1.10, // ~63 deg
-  DEFLECT_MIN_DIST: 220,   // spacing so two deflectors don’t create a pocket
+  // Edge kickers: deterministic inward ramps along BOTH sides
+  edgeKickerInset: 95,
+  edgeKickerLen: 420,
+  edgeKickerThick: 18,
+  edgeKickerStep: 520,
+  edgeKickerAngleA: 38,
+  edgeKickerAngleB: 46,
 
-  // Finish sensor
-  FINISH_SENSOR_W_PAD: 160,
-  FINISH_SENSOR_H: 28,
+  // Mid deflectors (short, angled): extra randomness
+  deflectCount: 22,
+  deflectLenMin: 90,
+  deflectLenMax: 150,
+  deflectThick: 16,
+  deflectAngleMin: 0.40, // rad
+  deflectAngleMax: 0.95, // rad
+  deflectEdgePad: 140,
 
   // Spinner
-  SPINNER_Y: 5200,
-  SPINNER_HUB_R: 30,
-  SPINNER_SPOKE_LEN: 240,
-  SPINNER_SPOKE_THICK: 16,
-  SPINNER_SPOKES: 6,
-  SPINNER_TARGET_AV: 0.14, // target angular velocity (kept constant)
+  spinnerY: 2100,
+  spinnerHubR: 34,
+  spinnerSpokeLen: 220,
+  spinnerSpokeThick: 18,
+  spinnerSpokeCount: 6,
+  spinnerOmega: 0.12,
+
+  // Finish sensor
+  finishWPad: 180,
+  finishH: 30,
+
+  // Ball
+  ballR: 13,
 };
 
-let spinnerRef = null;
-let keepSpinHandler = null;
-let finishCollisionHandler = null;
-
-function setStatus(msg) { statusEl.textContent = msg; }
+function setStatus(msg) {
+  if (statusEl) statusEl.textContent = msg;
+}
 
 function setPanelRunning(on) {
   if (!panelEl) return;
@@ -92,8 +110,13 @@ function setPanelRunning(on) {
   else panelEl.classList.remove("running");
 }
 
-function clamp(v, a, b) { return Math.max(a, Math.min(b, v)); }
-function rand_(a, b) { return a + Math.random() * (b - a); }
+function clamp(v, a, b) {
+  return Math.max(a, Math.min(b, v));
+}
+
+function rand(a, b) {
+  return a + Math.random() * (b - a);
+}
 
 function resizeCanvasToCSS() {
   const dpr = Math.max(1, Math.min(2, window.devicePixelRatio || 1));
@@ -107,7 +130,7 @@ function resizeCanvasToCSS() {
 }
 
 function parseNames() {
-  const lines = namesEl.value
+  const lines = (namesEl?.value || "")
     .split("\n")
     .map(s => s.trim())
     .filter(Boolean);
@@ -120,7 +143,9 @@ function parseNames() {
   return names.slice(0, 55);
 }
 
-/* ---------- Engine / Renderer ---------- */
+/* =========================
+   ENGINE / WORLD LIFECYCLE
+========================= */
 
 function initEngine() {
   engine = Engine.create();
@@ -156,10 +181,6 @@ function clearWorld() {
   if (render) Render.stop(render);
 
   if (engine) {
-    // remove event handlers safely
-    if (keepSpinHandler) Events.off(engine, "beforeUpdate", keepSpinHandler);
-    if (finishCollisionHandler) Events.off(engine, "collisionStart", finishCollisionHandler);
-
     Composite.clear(engine.world, false);
     Engine.clear(engine);
   }
@@ -169,15 +190,11 @@ function clearWorld() {
   confetti = [];
   bigWinText = null;
 
-  spinnerRef = null;
-  keepSpinHandler = null;
-  finishCollisionHandler = null;
-
   courseBuilt = false;
   isRunning = false;
 
-  top5El.innerHTML = "";
-  startBtn.disabled = true;
+  if (top5El) top5El.innerHTML = "";
+  if (startBtn) startBtn.disabled = true;
 
   setPanelRunning(false);
 }
@@ -186,119 +203,167 @@ function boot() {
   resizeCanvasToCSS();
   initEngine();
   setupCamera();
+  setupFinishCollision();
   setupCustomOverlayDrawing();
   setStatus("Paste names → Build Course → Start");
 }
 
-/* ---------- Course Pieces (NO TRAPS) ---------- */
+/* =========================
+   COURSE BUILDING (FIXED)
+========================= */
 
-function addWalls_(world, W, H) {
-  const t = COURSE.WALL_THICK;
+function addWalls_(world) {
+  const W = WORLD_CFG.width;
+  const H = WORLD_CFG.height;
+  const t = COURSE.wallThick;
+
   const walls = [
     Bodies.rectangle(W / 2, -t / 2, W + t * 2, t, { isStatic: true, render: { visible: false } }),
     Bodies.rectangle(W / 2, H + t / 2, W + t * 2, t, { isStatic: true, render: { visible: false } }),
     Bodies.rectangle(-t / 2, H / 2, t, H + t * 2, { isStatic: true, render: { visible: false } }),
-    Bodies.rectangle(W + t / 2, H / 2, t, H + t * 2, { isStatic: true, render: { visible: false } }),
+    Bodies.rectangle(W + t / 2, H / 2, t, H + t * 2, { isStatic: true, render: { visible: false } })
   ];
-  Composite.add(world, walls);
+
+  World.add(world, walls);
   return walls;
 }
 
-function addPegField_(world, W) {
-  const pegs = [];
-  const marginX = COURSE.PEG_MARGIN_X;
+function addPegFieldFull_(world) {
+  const W = WORLD_CFG.width;
+  const topY = COURSE.pegTopY;
+  const bottomY = WORLD_CFG.finishY - COURSE.pegBottomPad;
 
-  const cols = COURSE.PEG_COLS;
+  const cols = COURSE.pegCols;
+  const marginX = COURSE.pegMarginX;
+
   const usableW = Math.max(200, W - marginX * 2);
   const colGap = usableW / (cols - 1);
 
-  const rows = COURSE.PEG_ROWS;
-  const rowGap = COURSE.PEG_ROW_GAP;
-  let y = COURSE.PEG_TOP_Y;
+  const pegs = [];
+  let row = 0;
 
-  for (let r = 0; r < rows; r++) {
-    const offset = (r % 2 === 0) ? 0 : colGap / 2;
+  for (let y = topY; y <= bottomY; y += COURSE.pegRowsGap) {
+    const offset = (row % 2 === 0) ? 0 : colGap / 2;
+
     for (let c = 0; c < cols; c++) {
       let x = marginX + c * colGap + offset;
-      x = clamp(x, COURSE.PEG_R + 20, W - COURSE.PEG_R - 20);
+      x = clamp(x, COURSE.pegR + 18, W - COURSE.pegR - 18);
 
-      const peg = Bodies.circle(x, y, COURSE.PEG_R, {
+      // EXTRA: if we’re near extreme edges, add a second peg slightly inward
+      // (prevents clean vertical lanes at the margins)
+      const isEdgeCol = (c === 0 || c === cols - 1);
+
+      const peg = Bodies.circle(x, y, COURSE.pegR, {
         isStatic: true,
         restitution: 0.15,
-        friction: 0.15,
+        friction: 0.25,
         render: { fillStyle: "#2a2f3a" }
       });
       pegs.push(peg);
+
+      if (isEdgeCol) {
+        const x2 = (c === 0) ? x + 36 : x - 36;
+        const peg2 = Bodies.circle(x2, y + COURSE.pegRowsGap * 0.35, COURSE.pegR, {
+          isStatic: true,
+          restitution: 0.15,
+          friction: 0.25,
+          render: { fillStyle: "#2a2f3a" }
+        });
+        pegs.push(peg2);
+      }
     }
-    y += rowGap;
+
+    row++;
   }
 
-  Composite.add(world, pegs);
+  World.add(world, pegs);
   return pegs;
 }
 
-function tooClose_(x, y, placed) {
-  const minD2 = COURSE.DEFLECT_MIN_DIST * COURSE.DEFLECT_MIN_DIST;
-  for (const p of placed) {
-    const dx = x - p.x;
-    const dy = y - p.y;
-    if (dx * dx + dy * dy < minD2) return true;
+function addEdgeKickers_(world) {
+  const W = WORLD_CFG.width;
+  const y0 = COURSE.pegTopY + 240;
+  const y1 = WORLD_CFG.finishY - 900;
+
+  const inset = COURSE.edgeKickerInset;
+  const len = COURSE.edgeKickerLen;
+  const thk = COURSE.edgeKickerThick;
+
+  let flip = false;
+  const kickers = [];
+
+  for (let y = y0; y <= y1; y += COURSE.edgeKickerStep) {
+    const degL = flip ? COURSE.edgeKickerAngleB : COURSE.edgeKickerAngleA;
+    const degR = flip ? -COURSE.edgeKickerAngleB : -COURSE.edgeKickerAngleA;
+
+    // left kicker (slants down-right)
+    const left = Bodies.rectangle(inset, y, len, thk, {
+      isStatic: true,
+      angle: (degL * Math.PI) / 180,
+      restitution: 0.05,
+      friction: 0.50,
+      render: { fillStyle: "#202434" }
+    });
+
+    // right kicker (slants down-left)
+    const right = Bodies.rectangle(W - inset, y + COURSE.edgeKickerStep / 2, len, thk, {
+      isStatic: true,
+      angle: (degR * Math.PI) / 180,
+      restitution: 0.05,
+      friction: 0.50,
+      render: { fillStyle: "#202434" }
+    });
+
+    kickers.push(left, right);
+    flip = !flip;
   }
-  return false;
+
+  World.add(world, kickers);
+  return kickers;
 }
 
-function addShortDeflectors_(world, W, H) {
+function addShortDeflectors_(world) {
+  const W = WORLD_CFG.width;
+  const top = COURSE.pegTopY + 600;
+  const bottom = WORLD_CFG.finishY - 600;
+
   const deflectors = [];
-  const placed = [];
-
-  const top = COURSE.PEG_TOP_Y + COURSE.PEG_ROW_GAP * 1.2;
-  const bottom = WORLD.finishY - 420;
-
-  let tries = 0;
-  while (deflectors.length < COURSE.DEFLECT_COUNT && tries < 600) {
-    tries++;
-
-    const len = rand_(COURSE.DEFLECT_LEN_MIN, COURSE.DEFLECT_LEN_MAX);
-    const thick = COURSE.DEFLECT_THICK;
-
-    const x = rand_(140, W - 140);
-    const y = rand_(top, bottom);
-
-    if (tooClose_(x, y, placed)) continue;
+  for (let i = 0; i < COURSE.deflectCount; i++) {
+    const len = rand(COURSE.deflectLenMin, COURSE.deflectLenMax);
+    const x = rand(COURSE.deflectEdgePad, W - COURSE.deflectEdgePad);
+    const y = rand(top, bottom);
 
     const sign = Math.random() < 0.5 ? -1 : 1;
-    const angle = sign * rand_(COURSE.DEFLECT_ANGLE_MIN, COURSE.DEFLECT_ANGLE_MAX);
+    const angle = sign * rand(COURSE.deflectAngleMin, COURSE.deflectAngleMax);
 
-    const bar = Bodies.rectangle(x, y, len, thick, {
+    const bar = Bodies.rectangle(x, y, len, COURSE.deflectThick, {
       isStatic: true,
       angle,
       restitution: 0.05,
-      friction: 0.12,     // low friction = no “resting” on ledges
-      frictionStatic: 0.0,
+      friction: 0.45,
       render: { fillStyle: "#1d2230" }
     });
 
     deflectors.push(bar);
-    placed.push({ x, y });
   }
 
-  Composite.add(world, deflectors);
+  World.add(world, deflectors);
   return deflectors;
 }
 
-function addSpinnerInPath_(world, W) {
-  const cx = W * 0.5;
-  const cy = COURSE.SPINNER_Y;
+function addSpinnerInPath_(world) {
+  const cx = WORLD_CFG.width * 0.5;
+  const cy = COURSE.spinnerY;
 
-  const hub = Bodies.circle(cx, cy, COURSE.SPINNER_HUB_R, {
+  const hub = Bodies.circle(cx, cy, COURSE.spinnerHubR, {
     frictionAir: 0.02,
     render: { fillStyle: "#2a2f3a" }
   });
 
   const parts = [hub];
-  for (let i = 0; i < COURSE.SPINNER_SPOKES; i++) {
-    const a = (Math.PI * 2 * i) / COURSE.SPINNER_SPOKES;
-    const spoke = Bodies.rectangle(cx, cy, COURSE.SPINNER_SPOKE_LEN, COURSE.SPINNER_SPOKE_THICK, {
+  for (let i = 0; i < COURSE.spinnerSpokeCount; i++) {
+    const a = (Math.PI * 2 * i) / COURSE.spinnerSpokeCount;
+    const spoke = Bodies.rectangle(cx, cy, COURSE.spinnerSpokeLen, COURSE.spinnerSpokeThick, {
       angle: a,
       render: { fillStyle: "#2a2f3a" }
     });
@@ -306,7 +371,7 @@ function addSpinnerInPath_(world, W) {
   }
 
   const spinner = Body.create({ parts, frictionAir: 0.02 });
-  Body.setAngularVelocity(spinner, COURSE.SPINNER_TARGET_AV);
+  Body.setAngularVelocity(spinner, COURSE.spinnerOmega);
 
   const pin = Constraint.create({
     pointA: { x: cx, y: cy },
@@ -316,106 +381,70 @@ function addSpinnerInPath_(world, W) {
     length: 0
   });
 
-  Composite.add(world, [spinner, pin]);
-
-  // Keep it spinning (Matter will otherwise slow it down)
-  keepSpinHandler = () => {
-    if (!spinnerRef) return;
-    Body.setAngularVelocity(spinnerRef, COURSE.SPINNER_TARGET_AV);
-  };
-  Events.on(engine, "beforeUpdate", keepSpinHandler);
-
-  spinnerRef = spinner;
+  World.add(world, [spinner, pin]);
   return spinner;
 }
 
-function addFinishSensor_(world, W) {
-  const sensor = Bodies.rectangle(W / 2, WORLD.finishY, W - COURSE.FINISH_SENSOR_W_PAD, COURSE.FINISH_SENSOR_H, {
+function addFinishSensor_(world) {
+  const W = WORLD_CFG.width;
+  const y = WORLD_CFG.finishY;
+
+  const sensor = Bodies.rectangle(W / 2, y, W - COURSE.finishWPad, COURSE.finishH, {
     isStatic: true,
     isSensor: true,
     label: "finishSensor",
     render: { fillStyle: "rgba(120,100,255,0.35)" }
   });
 
-  // Hidden floor far below
-  const floor = Bodies.rectangle(W / 2, WORLD.height + 240, W + 600, 120, {
+  // hidden floor under everything
+  const floor = Bodies.rectangle(W / 2, WORLD_CFG.height + 220, W + 600, 100, {
     isStatic: true,
     render: { visible: false }
   });
 
-  Composite.add(world, [sensor, floor]);
-
-  finishCollisionHandler = (evt) => {
-    for (const pair of evt.pairs) {
-      const a = pair.bodyA;
-      const b = pair.bodyB;
-
-      const hitSensor = (a.label === "finishSensor" || b.label === "finishSensor");
-      if (!hitSensor) continue;
-
-      const ball = (a.label === "ball") ? a : (b.label === "ball") ? b : null;
-      if (!ball || !ball.plugin || ball.plugin.removed || ball.plugin.finished) continue;
-
-      ball.plugin.finished = true;
-
-      if (finishers.length < 5) {
-        finishers.push({ idx: ball.plugin.idx, name: ball.plugin.name, y: ball.position.y });
-        updateTop5UI();
-        celebrateFinisher(ball, finishers.length);
-        if (finishers.length === 5) setStatus("Top 5 decided! See scoreboard.");
-      }
-
-      setTimeout(() => removeBallFromWorld_(ball), 200);
-    }
-  };
-
-  Events.on(engine, "collisionStart", finishCollisionHandler);
+  World.add(world, [sensor, floor]);
   return sensor;
 }
 
-/* ---------- Build Course ---------- */
-
-function buildCourseFixed_() {
+function buildCourse() {
   const world = engine.world;
-  const W = WORLD.width;
-  const H = WORLD.height;
 
-  // Clear world bodies only (don’t nuke engine/render)
+  // Clear only bodies/constraints; keep engine running + render/camera hooks
   Composite.clear(world, false);
 
-  // Remove old handlers if rebuilding
-  if (keepSpinHandler) Events.off(engine, "beforeUpdate", keepSpinHandler);
-  if (finishCollisionHandler) Events.off(engine, "collisionStart", finishCollisionHandler);
-  keepSpinHandler = null;
-  finishCollisionHandler = null;
-  spinnerRef = null;
-
-  addWalls_(world, W, H);
-  addPegField_(world, W);
-  addShortDeflectors_(world, W, H);
-  addSpinnerInPath_(world, W);
-  addFinishSensor_(world, W);
+  // Course
+  addWalls_(world);
+  addPegFieldFull_(world);     // ✅ fills whole course height
+  addEdgeKickers_(world);      // ✅ deterministic edge anti-freefall
+  addShortDeflectors_(world);  // extra chaos
+  addSpinnerInPath_(world);    // spinner in real path
+  addFinishSensor_(world);     // ✅ single finish system
 
   engine.gravity.y = 1.0;
-  engine.gravity.x = 0.0;
+  engine.gravity.x = 0.0004;   // tiny drift to break perfect stacks
 
   courseBuilt = true;
-  startBtn.disabled = false;
+  isRunning = false;
+  if (startBtn) startBtn.disabled = false;
+
+  finishers = [];
+  updateTop5UI();
+  confetti = [];
+  bigWinText = null;
+
   setStatus("Course built. Click Start.");
 }
 
-function buildCourse() {
-  buildCourseFixed_();
-}
-
-/* ---------- Balls ---------- */
+/* =========================
+   BALLS
+========================= */
 
 function spawnBalls(names) {
   const world = engine.world;
   balls = [];
 
-  const startX = WORLD.width / 2;
-  const startY = WORLD.startY;
+  const startX = WORLD_CFG.width / 2;
+  const startY = WORLD_CFG.startY;
 
   const cols = 11;
   const spacing = 26;
@@ -423,18 +452,19 @@ function spawnBalls(names) {
   for (let i = 0; i < names.length; i++) {
     const col = i % cols;
     const row = Math.floor(i / cols);
+
     const hue = Math.floor((i * 360) / Math.max(1, names.length));
     const fill = `hsl(${hue} 90% 60%)`;
 
     const b = Bodies.circle(
       startX - ((cols - 1) / 2) * spacing + col * spacing,
       startY - row * spacing,
-      13,
+      COURSE.ballR,
       {
         label: "ball",
         restitution: 0.25,
-        friction: 0.02,
-        frictionAir: 0.016,
+        friction: 0.03,
+        frictionAir: 0.018,
         render: { fillStyle: fill }
       }
     );
@@ -443,19 +473,79 @@ function spawnBalls(names) {
     balls.push(b);
   }
 
-  if (staggerEl.checked) {
+  if (staggerEl?.checked) {
     let k = 0;
     const iv = setInterval(() => {
       if (k >= balls.length) { clearInterval(iv); return; }
-      Composite.add(world, balls[k]);
+      World.add(world, balls[k]);
       k++;
     }, 110);
   } else {
-    Composite.add(world, balls);
+    World.add(world, balls);
   }
 }
 
-/* ---------- Shake ---------- */
+function removeBallFromWorld_(b) {
+  if (!b || (b.plugin && b.plugin.removed)) return;
+  World.remove(engine.world, b);
+  if (b.plugin) b.plugin.removed = true;
+}
+
+/* =========================
+   FINISH (SINGLE SYSTEM)
+   - Uses ONLY sensor collisions.
+   - Removes balls immediately to prevent pileups.
+========================= */
+
+function setupFinishCollision() {
+  // make sure we don’t stack multiple handlers
+  Events.off(engine, "collisionStart", onFinishCollision_);
+  Events.on(engine, "collisionStart", onFinishCollision_);
+}
+
+function onFinishCollision_(evt) {
+  for (const pair of evt.pairs) {
+    const a = pair.bodyA;
+    const b = pair.bodyB;
+
+    const hitSensor = (a.label === "finishSensor" || b.label === "finishSensor");
+    if (!hitSensor) continue;
+
+    const ball = (a.label === "ball") ? a : (b.label === "ball") ? b : null;
+    if (!ball || !ball.plugin || ball.plugin.removed || ball.plugin.finished) continue;
+
+    ball.plugin.finished = true;
+
+    if (finishers.length < 5) {
+      finishers.push({ idx: ball.plugin.idx, name: ball.plugin.name, y: ball.position.y });
+      updateTop5UI();
+      celebrateFinisher(ball, finishers.length);
+      if (finishers.length === 5) setStatus("Top 5 decided! See scoreboard.");
+    }
+
+    // remove so it can’t keep colliding
+    setTimeout(() => removeBallFromWorld_(ball), 80);
+  }
+}
+
+/* =========================
+   UI / SCOREBOARD
+========================= */
+
+function updateTop5UI() {
+  if (!top5El) return;
+  top5El.innerHTML = "";
+  for (let i = 0; i < finishers.length; i++) {
+    const f = finishers[i];
+    const li = document.createElement("li");
+    li.textContent = `#${f.idx} — ${f.name}`;
+    top5El.appendChild(li);
+  }
+}
+
+/* =========================
+   SHAKE (unstuck)
+========================= */
 
 function shakeWorld() {
   if (!engine || !balls.length) return;
@@ -468,13 +558,13 @@ function shakeWorld() {
 
   const iv = setInterval(() => {
     const s = (step % 2 === 0) ? 1 : -1;
-    engine.gravity.x = 0.38 * s;
-    engine.gravity.y = baseGy + 0.10 * (Math.random() * 2 - 1);
+    engine.gravity.x = 0.45 * s;
+    engine.gravity.y = baseGy + 0.12 * (Math.random() * 2 - 1);
 
     for (const b of balls) {
       if (!b || b.isStatic || (b.plugin && b.plugin.removed)) continue;
-      const fx = (Math.random() * 0.020 - 0.010) * b.mass;
-      const fy = (Math.random() * 0.015 - 0.020) * b.mass;
+      const fx = (Math.random() * 0.022 - 0.011) * b.mass;
+      const fy = (Math.random() * 0.016 - 0.024) * b.mass;
       Body.applyForce(b, b.position, { x: fx, y: fy });
     }
 
@@ -487,19 +577,22 @@ function shakeWorld() {
   }, 55);
 }
 
-/* ---------- Camera (FIXED clamp) ---------- */
+/* =========================
+   CAMERA
+========================= */
 
 function setupCamera() {
   Events.on(engine, "afterUpdate", () => {
     if (!render) return;
 
-    const pr = (render.options.pixelRatio || 1);
+    const pr = render.options.pixelRatio || 1;
     const viewW = canvas.width / pr;
     const viewH = canvas.height / pr;
 
-    let targetY = WORLD.startY;
-    let targetX = WORLD.width / 2;
+    let targetY = WORLD_CFG.startY;
+    let targetX = WORLD_CFG.width / 2;
 
+    // leader = greatest y among active balls
     if (balls.length) {
       let leader = null;
       for (const b of balls) {
@@ -508,23 +601,16 @@ function setupCamera() {
       }
       if (leader) {
         targetY = leader.position.y;
-        targetX = followLeaderEl.checked ? leader.position.x : WORLD.width / 2;
+        targetX = (followLeaderEl?.checked) ? leader.position.x : WORLD_CFG.width / 2;
       }
     }
 
-    if (finishers.length > 0 && followLeaderEl.checked) {
-      const last = finishers[finishers.length - 1];
-      if (last && last.y != null) targetY = Math.max(targetY, last.y);
-    }
+    // keep view inside world bounds
+    const minX = 0, maxX = WORLD_CFG.width;
+    const minY = 0, maxY = WORLD_CFG.height;
 
-    const minX = 0, maxX = WORLD.width;
-    const minY = 0, maxY = WORLD.height;
-
-    const maxBX = Math.max(minX, maxX - viewW);
-    const maxBY = Math.max(minY, maxY - viewH);
-
-    const bx0 = clamp(targetX - viewW / 2, minX, maxBX);
-    const by0 = clamp(targetY - viewH / 2, minY, maxBY);
+    const bx0 = clamp(targetX - viewW / 2, minX, maxX - viewW);
+    const by0 = clamp(targetY - viewH / 2, minY, maxY - viewH);
 
     render.bounds.min.x = bx0;
     render.bounds.min.y = by0;
@@ -535,28 +621,12 @@ function setupCamera() {
   });
 }
 
-/* ---------- Finishers UI / Removal ---------- */
-
-function removeBallFromWorld_(b) {
-  if (!b || (b.plugin && b.plugin.removed)) return;
-  Composite.remove(engine.world, b);
-  if (b.plugin) b.plugin.removed = true;
-}
-
-function updateTop5UI() {
-  top5El.innerHTML = "";
-  for (let i = 0; i < finishers.length; i++) {
-    const f = finishers[i];
-    const li = document.createElement("li");
-    li.textContent = `#${f.idx} — ${f.name}`;
-    top5El.appendChild(li);
-  }
-}
-
-/* ---------- Confetti / Overlay ---------- */
+/* =========================
+   CONFETTI / OVERLAY
+========================= */
 
 function celebrateFinisher(ball, rank) {
-  ball.render.fillStyle = "#ffd54a";
+  if (ball?.render) ball.render.fillStyle = "#ffd54a";
   bigWinText = { text: `#${ball.plugin.idx}`, untilMs: performance.now() + 1700 };
   spawnConfetti(ball.position.x, ball.position.y - 120, 160 + rank * 25);
 }
@@ -629,9 +699,12 @@ function setupCustomOverlayDrawing() {
   });
 }
 
-/* ---------- Countdown / Music ---------- */
+/* =========================
+   COUNTDOWN + MUSIC
+========================= */
 
 async function runCountdown() {
+  if (!countdownEl) return;
   countdownEl.classList.remove("hidden");
   const seq = ["3", "2", "1", "GO!"];
   for (const s of seq) {
@@ -642,36 +715,38 @@ async function runCountdown() {
 }
 
 function tryPlayMusic() {
-  const url = musicUrlEl.value.trim();
+  const url = (musicUrlEl?.value || "").trim();
   if (url) music.src = url;
 
   if (!musicPlaying) {
     music.play().then(() => {
       musicPlaying = true;
-      musicBtn.textContent = "Pause";
+      if (musicBtn) musicBtn.textContent = "Pause";
     }).catch(() => {
-      setStatus("Music blocked by browser until user interaction. Click Play again.");
+      setStatus("Music blocked until user interaction. Click Play again.");
     });
   } else {
     music.pause();
     musicPlaying = false;
-    musicBtn.textContent = "Play";
+    if (musicBtn) musicBtn.textContent = "Play";
   }
 }
 
-/* ---------- UI wiring ---------- */
+/* =========================
+   UI WIRING
+========================= */
 
-buildBtn.addEventListener("click", () => {
+buildBtn?.addEventListener("click", () => {
   const names = parseNames();
   if (!names.length) { setStatus("Add at least 1 participant name."); return; }
   buildCourse();
 });
 
-shakeBtn.addEventListener("click", () => {
+shakeBtn?.addEventListener("click", () => {
   shakeWorld();
 });
 
-startBtn.addEventListener("click", async () => {
+startBtn?.addEventListener("click", async () => {
   if (!courseBuilt || isRunning) return;
 
   const names = parseNames();
@@ -692,15 +767,21 @@ startBtn.addEventListener("click", async () => {
   setStatus("Drop started. First 5 finishers win!");
 });
 
-resetBtn.addEventListener("click", () => {
+resetBtn?.addEventListener("click", () => {
   clearWorld();
   boot();
 });
 
-musicBtn.addEventListener("click", () => {
+musicBtn?.addEventListener("click", () => {
   tryPlayMusic();
 });
 
-/* ---------- Boot ---------- */
+/* =========================
+   BOOT
+========================= */
+
 resizeCanvasToCSS();
 boot();
+
+// Optional: auto-build once on load so you immediately see obstacles.
+// buildCourse();
