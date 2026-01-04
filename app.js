@@ -1,5 +1,11 @@
-/* app.js — Ball Drop Raffle (FIXED LABELS + CLEAN SCOREBOARD + TWITCH FLIPPERS)
-   - Matter.js required (matter.min.js loaded before this file)
+/* app.js — Ball Drop Raffle (FULL FIX)
+   - No auto-start (gravity OFF until Start)
+   - Numbers stay ON the balls (canvas draw, not DOM labels)
+   - Clean scoreboard: 1st Name (#), 2nd Name (#), ...
+   - Finish line is visible + sensor-based finishing
+   - Build Course / Start / Reset / Shake all work
+
+   Requires Matter.js loaded first (matter.min.js)
 */
 
 (() => {
@@ -12,7 +18,6 @@
     Body,
     Composite,
     Events,
-    Bounds,
     Vector
   } = Matter;
 
@@ -41,18 +46,18 @@
     PEG_OFFSET_Y: 130,
 
     // Finish
-    FINISH_Y_PADDING: 140, // finish line is near bottom of world
-    FINISH_SNAPSHOT_EVERY_MS: 200,
+    FINISH_Y_PADDING: 160,
+    FINISH_BAR_H: 22,
+    FINISH_BAR_FILL: "rgba(255,255,255,0.08)",
+    FINISH_BAR_STROKE: "rgba(255,255,255,0.14)",
 
     // Camera follow
     FOLLOW_LEADER_DEFAULT: true,
     CAMERA_LERP: 0.14,
-    CAMERA_PADDING_X: 260,
-    CAMERA_PADDING_Y: 220,
 
     // UI
-    LIVE_LEADERS_COUNT: 5,
-    FINAL_RESULTS_COUNT: 10,
+    FINAL_RESULTS_COUNT: 10, // what you show
+    TOP5_COUNT: 5,
 
     // Flippers ("twitch bars")
     FLIPPER_COUNT_PER_SIDE: 3,
@@ -60,13 +65,13 @@
     FLIPPER_H: 16,
     FLIPPER_TWITCH_INTERVAL_MS_MIN: 450,
     FLIPPER_TWITCH_INTERVAL_MS_MAX: 1100,
-    FLIPPER_KICK_ANGULAR_VEL: 0.55, // kick strength
+    FLIPPER_KICK_ANGULAR_VEL: 0.55,
     FLIPPER_RETURN_ANGULAR_VEL: -0.40,
-    FLIPPER_MAX_ANGLE: 0.90, // radians
+    FLIPPER_MAX_ANGLE: 0.90
   };
 
   // =========================
-  // DOM HELPERS (works even if your HTML differs)
+  // DOM HELPERS
   // =========================
   function qs(sel) { return document.querySelector(sel); }
   function el(tag, attrs = {}, children = []) {
@@ -80,14 +85,15 @@
     return n;
   }
 
-  // Ensure container
+  // =========================
+  // ENSURE ROOT + UI
+  // =========================
   let root = qs("#app");
   if (!root) {
     root = el("div", { id: "app", style: "position:fixed; inset:0; background:#0b0d10;" });
     document.body.appendChild(root);
   }
 
-  // Ensure sidebar
   let sidebar = qs("#sidebar");
   if (!sidebar) {
     sidebar = el("div", {
@@ -96,7 +102,7 @@
         "position:absolute",
         "left:16px",
         "top:16px",
-        "width:360px",
+        "width:380px",
         "max-width:calc(100vw - 32px)",
         "background:rgba(18,22,28,0.82)",
         "border:1px solid rgba(255,255,255,0.08)",
@@ -113,26 +119,40 @@
     root.appendChild(sidebar);
   }
 
-  // Ensure canvas holder
   let stage = qs("#stage");
   if (!stage) {
     stage = el("div", { id: "stage", style: "position:absolute; inset:0;" });
     root.appendChild(stage);
   }
 
-  // Sidebar UI
   sidebar.innerHTML = "";
-  const title = el("div", { style: "font-weight:800; font-size:16px; margin-bottom:10px;", text: "Ball Drop Raffle" });
 
-  const btnRow = el("div", { style: "display:flex; gap:8px; flex-wrap:wrap; margin-bottom:10px;" });
-  const btnReset = el("button", { type: "button" });
-  btnReset.textContent = "Reset";
-  const btnStart = el("button", { type: "button" });
-  btnStart.textContent = "Start";
-  const btnShake = el("button", { type: "button" });
-  btnShake.textContent = "Shake";
+  const title = el("div", { style: "font-weight:900; font-size:16px; margin-bottom:10px;", text: "Ball Drop Raffle" });
 
-  [btnReset, btnStart, btnShake].forEach(b => {
+  const namesBox = el("textarea", {
+    id: "namesBox",
+    placeholder: "One participant per line\n1. Alice\n2. Bob\n3. Chris",
+    style: [
+      "width:100%",
+      "height:120px",
+      "resize:vertical",
+      "background:rgba(255,255,255,0.06)",
+      "border:1px solid rgba(255,255,255,0.14)",
+      "color:#e9eef7",
+      "border-radius:10px",
+      "padding:10px",
+      "outline:none",
+      "font-weight:600"
+    ].join(";")
+  });
+
+  const btnRow1 = el("div", { style: "display:flex; gap:8px; flex-wrap:wrap; margin:10px 0;" });
+  const btnBuild = el("button", { type: "button" }); btnBuild.textContent = "Build Course";
+  const btnStart = el("button", { type: "button" }); btnStart.textContent = "Start";
+  const btnReset = el("button", { type: "button" }); btnReset.textContent = "Reset";
+  const btnShake = el("button", { type: "button" }); btnShake.textContent = "Shake";
+
+  [btnBuild, btnStart, btnReset, btnShake].forEach(b => {
     b.style.cssText = [
       "background:rgba(255,255,255,0.06)",
       "border:1px solid rgba(255,255,255,0.14)",
@@ -140,41 +160,33 @@
       "padding:7px 10px",
       "border-radius:10px",
       "cursor:pointer",
-      "font-weight:700"
+      "font-weight:800"
     ].join(";");
   });
 
-  btnRow.append(btnReset, btnStart, btnShake);
+  btnRow1.append(btnBuild, btnStart, btnReset, btnShake);
 
-  const optRow = el("div", { style: "display:flex; gap:12px; align-items:center; margin-bottom:8px; flex-wrap:wrap;" });
+  const optRow = el("div", { style: "display:flex; gap:10px; align-items:center; margin-bottom:8px; flex-wrap:wrap;" });
   const chkFollow = el("input", { type: "checkbox", id: "followLeader" });
   chkFollow.checked = CFG.FOLLOW_LEADER_DEFAULT;
-  const lblFollow = el("label", { for: "followLeader", style: "cursor:pointer; user-select:none;" });
+  const lblFollow = el("label", { for: "followLeader", style: "cursor:pointer; user-select:none; font-weight:700;" });
   lblFollow.textContent = "Follow leader";
   optRow.append(chkFollow, lblFollow);
 
-  const status = el("div", { style: "opacity:0.9; margin:8px 0 10px 0;" });
-  status.textContent = "Ready.";
+  const status = el("div", { style: "opacity:0.95; margin:8px 0 10px 0; font-weight:700;" });
+  status.textContent = "Paste names → Build Course → Start";
 
   const hr = el("div", { style: "height:1px; background:rgba(255,255,255,0.10); margin:10px 0;" });
 
-  const scoreBox = el("div");
-  const scoreTitle = el("div", { style: "font-weight:900; margin-bottom:6px;" });
-  scoreTitle.textContent = "Results";
+  const scoreTitle = el("div", { style: "font-weight:900; margin-bottom:6px;", text: "Scoreboard" });
 
-  const liveTitle = el("div", { style: "font-weight:800; margin:8px 0 4px;" });
-  liveTitle.textContent = "Live Leaders (Top 5)";
+  const top5Title = el("div", { style: "font-weight:800; margin:8px 0 4px;", text: "Top 5 (Finish Order)" });
+  const top5List = el("ol", { style: "margin:0 0 10px 18px; padding:0;" });
 
-  const liveList = el("ol", { style: "margin:0 0 10px 18px; padding:0;" });
-
-  const finalTitle = el("div", { style: "font-weight:800; margin:8px 0 4px;" });
-  finalTitle.textContent = "Final Results (Top 10)";
-
+  const finalTitle = el("div", { style: "font-weight:800; margin:8px 0 4px;", text: "Winners (Finish Order)" });
   const finalList = el("ol", { style: "margin:0 0 0 18px; padding:0;" });
 
-  scoreBox.append(scoreTitle, liveTitle, liveList, finalTitle, finalList);
-
-  sidebar.append(title, btnRow, optRow, status, hr, scoreBox);
+  sidebar.append(title, namesBox, btnRow1, optRow, status, hr, scoreTitle, top5Title, top5List, finalTitle, finalList);
 
   // =========================
   // STATE
@@ -183,58 +195,95 @@
   let balls = [];
   let pegs = [];
   let flippers = [];
+  let finishSensor = null;
+
+  let worldW = 0;
+  let worldH = 0;
   let floorY = 0;
   let finishY = 0;
 
-  let running = false;
-  let finishedIds = new Set();
-  let finishOrder = []; // {id, name, num, t}
-  let lastFinishScan = 0;
+  let built = false;
+  let started = false;
 
-  // Example "names" (replace with your actual list if you want)
-  // If you already load names elsewhere, just set window.RAFFLE_NAMES = [...]
-  const names = Array.isArray(window.RAFFLE_NAMES) && window.RAFFLE_NAMES.length
-    ? window.RAFFLE_NAMES.slice()
-    : Array.from({ length: CFG.BALL_COUNT }, (_, i) => `Player ${i + 1}`);
+  let finishedIds = new Set();
+  let finishOrder = []; // {id, num, name, ms}
+
+  // Kill any old DOM labels from previous versions if they exist
+  function cleanupLegacyLabels_() {
+    const olds = document.querySelectorAll(".ball-label, .ballLabel, [data-ball-label]");
+    olds.forEach(n => n.remove());
+  }
 
   // =========================
-  // BUILD WORLD
+  // PARSE NAMES
+  // =========================
+  function parseNames_() {
+    const raw = (namesBox.value || "").trim();
+    if (!raw) return [];
+    const lines = raw.split("\n").map(s => s.trim()).filter(Boolean);
+    return lines.map((line, idx) => {
+      // allow "1. Name" or "Name"
+      const m = line.match(/^\s*\d+\s*[\.\)]\s*(.+)$/);
+      return (m ? m[1].trim() : line) || `Player ${idx + 1}`;
+    });
+  }
+
+  // =========================
+  // DESTROY WORLD
   // =========================
   function destroyWorld() {
+    cleanupLegacyLabels_();
+
     if (render) {
       Render.stop(render);
-      render.canvas.remove();
+      try { render.canvas.remove(); } catch (_) {}
       render.textures = {};
     }
     if (runner) Runner.stop(runner);
+
     engine = null;
     world = null;
     render = null;
     runner = null;
+
     balls = [];
     pegs = [];
     flippers = [];
-    running = false;
-    finishedIds.clear();
+    finishSensor = null;
+
+    built = false;
+    started = false;
+
+    finishedIds = new Set();
     finishOrder = [];
-    lastFinishScan = 0;
-    liveList.innerHTML = "";
+
+    top5List.innerHTML = "";
     finalList.innerHTML = "";
   }
 
+  // =========================
+  // BUILD WORLD (NO AUTO START)
+  // =========================
   function buildWorld() {
     destroyWorld();
 
+    const names = parseNames_();
+    if (names.length === 0) {
+      status.textContent = "Paste at least 1 name first.";
+      return;
+    }
+
     engine = Engine.create();
     world = engine.world;
-    world.gravity.y = CFG.GRAVITY_Y;
+
+    // IMPORTANT: gravity OFF until Start
+    world.gravity.y = 0;
 
     const w = window.innerWidth;
     const h = window.innerHeight;
 
-    // World height big enough for long fall
-    const worldW = Math.max(1200, w);
-    const worldH = Math.max(2600, h * 2.2);
+    worldW = Math.max(1200, w);
+    worldH = Math.max(2600, Math.floor(h * 2.2));
 
     floorY = worldH - 120;
     finishY = floorY - CFG.FINISH_Y_PADDING;
@@ -246,7 +295,16 @@
 
     World.add(world, [wallL, wallR, floor]);
 
+    // Finish sensor (thin, full width)
+    finishSensor = Bodies.rectangle(worldW / 2, finishY, worldW * 2, CFG.FINISH_BAR_H, {
+      isStatic: true,
+      isSensor: true,
+      render: { visible: false }
+    });
+    World.add(world, finishSensor);
+
     // Peg grid
+    pegs = [];
     const startX = CFG.PEG_OFFSET_X;
     const startY = CFG.PEG_OFFSET_Y;
     for (let r = 0; r < CFG.PEG_ROWS; r++) {
@@ -262,15 +320,14 @@
     }
     World.add(world, pegs);
 
-    // Random diagonal bars (keep what you already liked)
+    // Diagonal bars (your existing style)
     const bars = [];
     function addBar(x, y, length, angle) {
-      const bar = Bodies.rectangle(x, y, length, 14, {
+      bars.push(Bodies.rectangle(x, y, length, 14, {
         isStatic: true,
         angle,
         render: { fillStyle: "rgba(80,100,140,0.28)" }
-      });
-      bars.push(bar);
+      }));
     }
     addBar(220, 520, 520, 0.85);
     addBar(980, 380, 420, -0.85);
@@ -281,29 +338,28 @@
     addBar(980, 2080, 520, 0.70);
     World.add(world, bars);
 
-    // Twitch flippers: 3 left + 3 right at 1/3 and 2/3 height zones
+    // Twitch flippers
     flippers = buildTwitchFlippers_(worldW, worldH);
     World.add(world, flippers.map(f => f.body));
 
-    // Balls (stagger spawn at top)
+    // Balls (created but "held" until Start)
     balls = [];
-    for (let i = 0; i < CFG.BALL_COUNT; i++) {
+    const count = Math.min(CFG.BALL_COUNT, names.length);
+    for (let i = 0; i < count; i++) {
       const x = worldW / 2 + (Math.random() * 220 - 110);
-      const y = 40 + i * 10; // stagger
+      const y = 60 + i * 26; // staged stack
       const b = Bodies.circle(x, y, CFG.BALL_RADIUS, {
         restitution: CFG.BALL_RESTITUTION,
         friction: CFG.BALL_FRICTION,
         frictionAir: CFG.BALL_FRICTION_AIR,
         density: CFG.BALL_DENSITY,
+        // start "frozen"
+        isSleeping: true,
         render: { fillStyle: pickColor_(i) }
       });
 
-      // IMPORTANT: store id/num/name on the body itself
       b.plugin = b.plugin || {};
-      b.plugin.raffle = {
-        num: i + 1,
-        name: names[i] || `Player ${i + 1}`
-      };
+      b.plugin.raffle = { num: i + 1, name: names[i] };
 
       balls.push(b);
     }
@@ -328,39 +384,248 @@
     runner = Runner.create();
     Runner.run(runner, engine);
 
-    // Draw labels INSIDE the canvas (this is the core fix)
-    Events.on(render, "afterRender", () => {
-      drawBallLabels_();
-      drawFinishLine_();
+    // Finish detection via collision with sensor
+    Events.on(engine, "collisionStart", (evt) => {
+      if (!started) return;
+      for (const pair of evt.pairs) {
+        const a = pair.bodyA;
+        const b = pair.bodyB;
+        const ball = (a === finishSensor) ? b : (b === finishSensor ? a : null);
+        if (!ball) continue;
+        if (!ball.plugin || !ball.plugin.raffle) continue;
+        if (finishedIds.has(ball.id)) continue;
+
+        finishedIds.add(ball.id);
+        finishOrder.push({
+          id: ball.id,
+          num: ball.plugin.raffle.num,
+          name: ball.plugin.raffle.name,
+          ms: Date.now()
+        });
+
+        // optional: dampen it after finish
+        Body.setVelocity(ball, { x: 0, y: 0 });
+        Body.setAngularVelocity(ball, 0);
+      }
     });
 
-    // Tick logic (camera follow + finish detection + flipper twitch)
+    // Draw labels & finish line
+    Events.on(render, "afterRender", () => {
+      drawFinishLine_();
+      drawBallLabels_();
+    });
+
+    // Tick (camera + flippers + scoreboard)
     Events.on(engine, "beforeUpdate", () => {
       if (chkFollow.checked) updateCameraFollow_();
-      scanFinishers_();
-      twitchFlippers_();
+      if (started) twitchFlippers_();
       updateScoreboard_();
     });
 
-    // Resize
     window.addEventListener("resize", onResize_);
 
+    built = true;
+    started = false;
     status.textContent = "Course built. Click Start.";
+    top5List.innerHTML = "";
+    finalList.innerHTML = "";
+  }
+
+  // =========================
+  // START / RESET / SHAKE
+  // =========================
+  function startRace() {
+    if (!built) {
+      status.textContent = "Build Course first.";
+      return;
+    }
+    if (started) {
+      status.textContent = "Already started.";
+      return;
+    }
+
+    // Clear finishes
+    finishedIds = new Set();
+    finishOrder = [];
+    top5List.innerHTML = "";
+    finalList.innerHTML = "";
+
+    // Release balls + enable gravity
+    world.gravity.y = CFG.GRAVITY_Y;
+    started = true;
+
+    for (const b of balls) {
+      Body.setSleeping(b, false);
+      // tiny random nudge so they don’t stack perfectly
+      Body.applyForce(b, b.position, { x: (Math.random() - 0.5) * 0.0006, y: 0 });
+    }
+
+    status.textContent = "Drop started!";
+  }
+
+  function resetAll() {
+    // same as "Build Course" but keeps names text
+    buildWorld();
+  }
+
+  function shake() {
+    if (!built) return;
+    for (const b of balls) {
+      const fx = (Math.random() - 0.5) * 0.0015;
+      const fy = (Math.random() - 0.5) * 0.0015;
+      Body.applyForce(b, b.position, { x: fx, y: fy });
+    }
+    status.textContent = "Shaken.";
+  }
+
+  // =========================
+  // SCOREBOARD (CLEAN)
+  // =========================
+  function updateScoreboard_() {
+    // Finish order only. (This is what you wanted.)
+    const winners = finishOrder.slice(0, CFG.FINAL_RESULTS_COUNT);
+
+    // Top 5 = first 5 winners
+    const top5 = winners.slice(0, CFG.TOP5_COUNT);
+
+    top5List.innerHTML = "";
+    if (top5.length === 0) {
+      top5List.appendChild(el("li", { text: "(no finishers yet)" }));
+    } else {
+      for (let i = 0; i < top5.length; i++) {
+        const p = top5[i];
+        top5List.appendChild(el("li", { text: `${ordinal_(i + 1)} ${p.name} (#${p.num})` }));
+      }
+    }
+
+    finalList.innerHTML = "";
+    if (winners.length === 0) {
+      finalList.appendChild(el("li", { text: "(no finishers yet)" }));
+    } else {
+      for (let i = 0; i < winners.length; i++) {
+        const p = winners[i];
+        finalList.appendChild(el("li", { text: `${ordinal_(i + 1)} ${p.name} (#${p.num})` }));
+      }
+    }
+
+    if (started && winners.length >= CFG.FINAL_RESULTS_COUNT) {
+      status.textContent = `Top ${CFG.FINAL_RESULTS_COUNT} decided.`;
+      // keep running visually, but you could set started=false if you want to “freeze”
+    }
+  }
+
+  // =========================
+  // CANVAS LABELS (ALWAYS STUCK TO BALLS)
+  // =========================
+  function drawBallLabels_() {
+    if (!render) return;
+
+    const ctx = render.context;
+    ctx.save();
+
+    const bounds = render.bounds;
+    const w = render.options.width;
+    const h = render.options.height;
+
+    const scaleX = w / (bounds.max.x - bounds.min.x);
+    const scaleY = h / (bounds.max.y - bounds.min.y);
+
+    ctx.scale(scaleX, scaleY);
+    ctx.translate(-bounds.min.x, -bounds.min.y);
+
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+    ctx.font = "900 14px system-ui, -apple-system, Segoe UI, Roboto, Arial";
+
+    for (const b of balls) {
+      const meta = b.plugin && b.plugin.raffle;
+      if (!meta) continue;
+
+      const x = b.position.x;
+      const y = b.position.y;
+
+      ctx.lineWidth = 3;
+      ctx.strokeStyle = "rgba(0,0,0,0.60)";
+      ctx.strokeText(String(meta.num), x, y);
+
+      ctx.fillStyle = "rgba(255,255,255,0.95)";
+      ctx.fillText(String(meta.num), x, y);
+    }
+
+    ctx.restore();
+  }
+
+  function drawFinishLine_() {
+    if (!render) return;
+
+    const ctx = render.context;
+    const bounds = render.bounds;
+    const w = render.options.width;
+    const h = render.options.height;
+
+    const scaleX = w / (bounds.max.x - bounds.min.x);
+    const scaleY = h / (bounds.max.y - bounds.min.y);
+
+    ctx.save();
+    ctx.scale(scaleX, scaleY);
+    ctx.translate(-bounds.min.x, -bounds.min.y);
+
+    // big visible bar
+    const barY = finishY - CFG.FINISH_BAR_H / 2;
+    ctx.fillStyle = CFG.FINISH_BAR_FILL;
+    ctx.strokeStyle = CFG.FINISH_BAR_STROKE;
+    ctx.lineWidth = 2;
+
+    ctx.beginPath();
+    ctx.rect(bounds.min.x, barY, (bounds.max.x - bounds.min.x), CFG.FINISH_BAR_H);
+    ctx.fill();
+    ctx.stroke();
+
+    ctx.restore();
+  }
+
+  // =========================
+  // CAMERA FOLLOW
+  // =========================
+  function updateCameraFollow_() {
+    if (!render || balls.length === 0) return;
+
+    // leader = highest Y (lowest on screen)
+    let leader = balls[0];
+    for (const b of balls) if (b.position.y > leader.position.y) leader = b;
+
+    const bounds = render.bounds;
+    const viewW = bounds.max.x - bounds.min.x;
+    const viewH = bounds.max.y - bounds.min.y;
+
+    const targetMin = {
+      x: leader.position.x - viewW / 2,
+      y: leader.position.y - viewH / 2
+    };
+    const targetMax = {
+      x: targetMin.x + viewW,
+      y: targetMin.y + viewH
+    };
+
+    bounds.min.x += (targetMin.x - bounds.min.x) * CFG.CAMERA_LERP;
+    bounds.min.y += (targetMin.y - bounds.min.y) * CFG.CAMERA_LERP;
+    bounds.max.x += (targetMax.x - bounds.max.x) * CFG.CAMERA_LERP;
+    bounds.max.y += (targetMax.y - bounds.max.y) * CFG.CAMERA_LERP;
   }
 
   // =========================
   // FLIPPERS
   // =========================
-  function buildTwitchFlippers_(worldW, worldH) {
+  function buildTwitchFlippers_(wW, wH) {
     const out = [];
-    const leftX = Math.round(worldW * 0.18);
-    const rightX = Math.round(worldW * 0.82);
+    const leftX = Math.round(wW * 0.18);
+    const rightX = Math.round(wW * 0.82);
 
-    const y1 = Math.round(worldH * 0.33);
-    const y2 = Math.round(worldH * 0.52);
-    const y3 = Math.round(worldH * 0.70);
-
-    const ys = [y1, y2, y3];
+    const ys = [
+      Math.round(wH * 0.33),
+      Math.round(wH * 0.52),
+      Math.round(wH * 0.70)
+    ];
 
     for (let i = 0; i < CFG.FLIPPER_COUNT_PER_SIDE; i++) {
       out.push(makeFlipper_(leftX, ys[i], +1));
@@ -388,10 +653,8 @@
 
   function twitchFlippers_() {
     const now = performance.now();
-
     for (const f of flippers) {
       if (now >= f.nextTwitchAt && f.mode === "idle") {
-        // twitch: quickly rotate a bit to kick
         f.mode = "kick";
         f.targetAngle = clamp_(f.baseAngle + f.dir * CFG.FLIPPER_MAX_ANGLE, -Math.PI, Math.PI);
       }
@@ -405,7 +668,6 @@
       } else if (f.mode === "return") {
         Body.setAngularVelocity(f.body, f.dir * CFG.FLIPPER_RETURN_ANGULAR_VEL);
         if (Math.abs(f.body.angle - f.targetAngle) < 0.10) {
-          // settle
           Body.setAngle(f.body, f.baseAngle);
           Body.setAngularVelocity(f.body, 0);
           f.mode = "idle";
@@ -416,203 +678,8 @@
   }
 
   // =========================
-  // LABELS — FIXED (draw in canvas)
+  // RESIZE
   // =========================
-  function drawBallLabels_() {
-    const ctx = render.context;
-    ctx.save();
-
-    // Match Matter.Render view transform
-    const bounds = render.bounds;
-    const w = render.options.width;
-    const h = render.options.height;
-
-    const scaleX = w / (bounds.max.x - bounds.min.x);
-    const scaleY = h / (bounds.max.y - bounds.min.y);
-
-    ctx.scale(scaleX, scaleY);
-    ctx.translate(-bounds.min.x, -bounds.min.y);
-
-    ctx.textAlign = "center";
-    ctx.textBaseline = "middle";
-    ctx.font = "bold 14px system-ui, -apple-system, Segoe UI, Roboto, Arial";
-
-    for (const b of balls) {
-      const meta = b.plugin && b.plugin.raffle;
-      if (!meta) continue;
-
-      // Draw number centered ON the ball every frame
-      const x = b.position.x;
-      const y = b.position.y;
-
-      // subtle outline for readability
-      ctx.lineWidth = 3;
-      ctx.strokeStyle = "rgba(0,0,0,0.55)";
-      ctx.strokeText(String(meta.num), x, y);
-
-      ctx.fillStyle = "rgba(255,255,255,0.92)";
-      ctx.fillText(String(meta.num), x, y);
-    }
-
-    ctx.restore();
-  }
-
-  function drawFinishLine_() {
-    const ctx = render.context;
-    const bounds = render.bounds;
-    const w = render.options.width;
-    const h = render.options.height;
-
-    const scaleX = w / (bounds.max.x - bounds.min.x);
-    const scaleY = h / (bounds.max.y - bounds.min.y);
-
-    ctx.save();
-    ctx.scale(scaleX, scaleY);
-    ctx.translate(-bounds.min.x, -bounds.min.y);
-
-    ctx.strokeStyle = "rgba(255,255,255,0.08)";
-    ctx.lineWidth = 2;
-    ctx.beginPath();
-    ctx.moveTo(bounds.min.x, finishY);
-    ctx.lineTo(bounds.max.x, finishY);
-    ctx.stroke();
-
-    ctx.restore();
-  }
-
-  // =========================
-  // SCOREBOARD (clean)
-  // =========================
-  function scanFinishers_() {
-    const now = performance.now();
-    if (now - lastFinishScan < CFG.FINISH_SNAPSHOT_EVERY_MS) return;
-    lastFinishScan = now;
-
-    for (const b of balls) {
-      const meta = b.plugin && b.plugin.raffle;
-      if (!meta) continue;
-
-      if (finishedIds.has(b.id)) continue;
-
-      if (b.position.y >= finishY) {
-        finishedIds.add(b.id);
-        finishOrder.push({
-          id: b.id,
-          num: meta.num,
-          name: meta.name,
-          t: Date.now()
-        });
-      }
-    }
-  }
-
-  function updateScoreboard_() {
-    // Live leaders: closest to finish (largest y), excluding finished
-    const live = balls
-      .filter(b => !finishedIds.has(b.id))
-      .map(b => {
-        const meta = b.plugin.raffle;
-        return {
-          id: b.id,
-          num: meta.num,
-          name: meta.name,
-          y: b.position.y
-        };
-      })
-      .sort((a, b) => b.y - a.y)
-      .slice(0, CFG.LIVE_LEADERS_COUNT);
-
-    // Final results (finish order)
-    const final = finishOrder.slice(0, CFG.FINAL_RESULTS_COUNT);
-
-    // Render lists
-    liveList.innerHTML = "";
-    if (live.length === 0) {
-      liveList.appendChild(el("li", { text: "(waiting for balls...)" }));
-    } else {
-      for (const p of live) {
-        liveList.appendChild(el("li", { text: `${p.name} (#${p.num})` }));
-      }
-    }
-
-    finalList.innerHTML = "";
-    if (final.length === 0) {
-      finalList.appendChild(el("li", { text: "(no finishers yet)" }));
-    } else {
-      for (const p of final) {
-        finalList.appendChild(el("li", { text: `${p.name} (#${p.num})` }));
-      }
-    }
-
-    // Status message
-    if (running && final.length >= CFG.FINAL_RESULTS_COUNT) {
-      status.textContent = `Top ${CFG.FINAL_RESULTS_COUNT} decided.`;
-      running = false;
-    }
-  }
-
-  // =========================
-  // CAMERA FOLLOW
-  // =========================
-  function updateCameraFollow_() {
-    // Follow "leader" = highest y (closest to finish), regardless of finished state
-    let leader = balls[0];
-    for (const b of balls) {
-      if (b.position.y > leader.position.y) leader = b;
-    }
-
-    const bounds = render.bounds;
-
-    const viewW = bounds.max.x - bounds.min.x;
-    const viewH = bounds.max.y - bounds.min.y;
-
-    const targetCenter = {
-      x: leader.position.x,
-      y: leader.position.y
-    };
-
-    // clamp camera so it doesn't go beyond world-ish ranges
-    const desiredMin = {
-      x: targetCenter.x - viewW / 2,
-      y: targetCenter.y - viewH / 2
-    };
-
-    const desiredMax = {
-      x: desiredMin.x + viewW,
-      y: desiredMin.y + viewH
-    };
-
-    // lerp
-    bounds.min.x += (desiredMin.x - bounds.min.x) * CFG.CAMERA_LERP;
-    bounds.min.y += (desiredMin.y - bounds.min.y) * CFG.CAMERA_LERP;
-    bounds.max.x += (desiredMax.x - bounds.max.x) * CFG.CAMERA_LERP;
-    bounds.max.y += (desiredMax.y - bounds.max.y) * CFG.CAMERA_LERP;
-  }
-
-  // =========================
-  // ACTIONS
-  // =========================
-  function startRace() {
-    running = true;
-    status.textContent = "Drop started. Recording finishers...";
-  }
-
-  function shake() {
-    for (const b of balls) {
-      const fx = (Math.random() - 0.5) * 0.03 * b.mass;
-      const fy = (Math.random() - 0.5) * 0.03 * b.mass;
-      Body.applyForce(b, b.position, { x: fx, y: fy });
-    }
-    status.textContent = "Shaken.";
-  }
-
-  // =========================
-  // EVENTS
-  // =========================
-  btnReset.addEventListener("click", () => buildWorld());
-  btnStart.addEventListener("click", () => startRace());
-  btnShake.addEventListener("click", () => shake());
-
   function onResize_() {
     if (!render) return;
     render.options.width = window.innerWidth;
@@ -633,17 +700,37 @@
     ];
     return palette[i % palette.length];
   }
-
-  function rand_(min, max) {
-    return min + Math.random() * (max - min);
-  }
-
-  function clamp_(v, a, b) {
-    return Math.max(a, Math.min(b, v));
+  function rand_(min, max) { return min + Math.random() * (max - min); }
+  function clamp_(v, a, b) { return Math.max(a, Math.min(b, v)); }
+  function ordinal_(n) {
+    if (n === 1) return "1st";
+    if (n === 2) return "2nd";
+    if (n === 3) return "3rd";
+    return `${n}th`;
   }
 
   // =========================
-  // INIT
+  // BUTTONS
   // =========================
-  buildWorld();
+  btnBuild.addEventListener("click", () => {
+    try { buildWorld(); } catch (e) { status.textContent = "Build failed: " + (e && e.message ? e.message : String(e)); }
+  });
+
+  btnStart.addEventListener("click", () => {
+    try { startRace(); } catch (e) { status.textContent = "Start failed: " + (e && e.message ? e.message : String(e)); }
+  });
+
+  btnReset.addEventListener("click", () => {
+    try { resetAll(); } catch (e) { status.textContent = "Reset failed: " + (e && e.message ? e.message : String(e)); }
+  });
+
+  btnShake.addEventListener("click", () => {
+    try { shake(); } catch (e) { status.textContent = "Shake failed: " + (e && e.message ? e.message : String(e)); }
+  });
+
+  // =========================
+  // INIT (do NOT auto-start)
+  // =========================
+  cleanupLegacyLabels_();
+  status.textContent = "Paste names → Build Course → Start";
 })();
