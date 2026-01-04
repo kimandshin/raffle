@@ -1,5 +1,5 @@
-/* app.js — Ball Drop Raffle (fixed labels + clearer scoreboard + twitch kicker bars)
-   Requires Matter.js loaded as matter.min.js
+/* app.js — Ball Drop Raffle (FIXED LABELS + CLEAN SCOREBOARD + TWITCH FLIPPERS)
+   - Matter.js required (matter.min.js loaded before this file)
 */
 
 (() => {
@@ -12,619 +12,638 @@
     Body,
     Composite,
     Events,
+    Bounds,
     Vector
   } = Matter;
 
-  // ---------- DOM ----------
-  const canvas = document.getElementById("world");
-  const elMsg = document.getElementById("msg");
-  const elLive = document.getElementById("liveTop");
-  const elFinish = document.getElementById("finishOrder");
-  const elBuild = document.getElementById("btnBuild");
-  const elStart = document.getElementById("btnStart");
-  const elReset = document.getElementById("btnReset");
-  const elShake = document.getElementById("btnShake");
-  const elFollow = document.getElementById("chkFollow");
-  const elStagger = document.getElementById("chkStagger");
-
-  // ---------- CONFIG ----------
+  // =========================
+  // CONFIG
+  // =========================
   const CFG = {
-    width: 1600,
-    height: 2400,
-    gravity: 1.15,
+    // Balls
+    BALL_COUNT: 50,
+    BALL_RADIUS: 14,
+    BALL_RESTITUTION: 0.45,
+    BALL_FRICTION: 0.04,
+    BALL_FRICTION_AIR: 0.012,
+    BALL_DENSITY: 0.002,
 
-    ballRadius: 16,
-    ballRestitution: 0.25,
-    ballFriction: 0.08,
-    ballFrictionAir: 0.002,
+    // World
+    GRAVITY_Y: 1.05,
+    WALL_THICKNESS: 80,
 
-    pegRadius: 7,
-    pegSpacingX: 90,
-    pegSpacingY: 85,
-    pegMargin: 120,
+    // Course
+    PEG_ROWS: 14,
+    PEG_COLS: 14,
+    PEG_RADIUS: 6,
+    PEG_SPACING: 60,
+    PEG_OFFSET_X: 160,
+    PEG_OFFSET_Y: 130,
 
-    wallThickness: 80,
-    wallTiltDeg: 28,
+    // Finish
+    FINISH_Y_PADDING: 140, // finish line is near bottom of world
+    FINISH_SNAPSHOT_EVERY_MS: 200,
 
-    rampThickness: 18,
+    // Camera follow
+    FOLLOW_LEADER_DEFAULT: true,
+    CAMERA_LERP: 0.14,
+    CAMERA_PADDING_X: 260,
+    CAMERA_PADDING_Y: 220,
 
-    finishY: 2200,
-    finishSensorHeight: 35,
+    // UI
+    LIVE_LEADERS_COUNT: 5,
+    FINAL_RESULTS_COUNT: 10,
 
-    cameraPadding: 320,
-    cameraLerp: 0.12,
-
-    liveTopN: 10,
-    finishTopN: 10,
-
-    // twitch bars (kickers)
-    kickerCountPerSide: 3,
-    kickerWidth: 160,
-    kickerHeight: 16,
-    kickerAmplitude: 70,
-    kickerSpeedMin: 0.012,
-    kickerSpeedMax: 0.022,
-
-    labelFont: "600 14px system-ui, -apple-system, Segoe UI, Roboto, Arial",
-    labelColor: "rgba(255,255,255,0.92)",
-    labelStroke: "rgba(0,0,0,0.45)",
-    labelStrokeW: 4
+    // Flippers ("twitch bars")
+    FLIPPER_COUNT_PER_SIDE: 3,
+    FLIPPER_W: 110,
+    FLIPPER_H: 16,
+    FLIPPER_TWITCH_INTERVAL_MS_MIN: 450,
+    FLIPPER_TWITCH_INTERVAL_MS_MAX: 1100,
+    FLIPPER_KICK_ANGULAR_VEL: 0.55, // kick strength
+    FLIPPER_RETURN_ANGULAR_VEL: -0.40,
+    FLIPPER_MAX_ANGLE: 0.90, // radians
   };
 
-  // ---------- STATE ----------
-  let engine, runner, render;
+  // =========================
+  // DOM HELPERS (works even if your HTML differs)
+  // =========================
+  function qs(sel) { return document.querySelector(sel); }
+  function el(tag, attrs = {}, children = []) {
+    const n = document.createElement(tag);
+    Object.entries(attrs).forEach(([k, v]) => {
+      if (k === "class") n.className = v;
+      else if (k === "text") n.textContent = v;
+      else n.setAttribute(k, v);
+    });
+    children.forEach(c => n.appendChild(c));
+    return n;
+  }
+
+  // Ensure container
+  let root = qs("#app");
+  if (!root) {
+    root = el("div", { id: "app", style: "position:fixed; inset:0; background:#0b0d10;" });
+    document.body.appendChild(root);
+  }
+
+  // Ensure sidebar
+  let sidebar = qs("#sidebar");
+  if (!sidebar) {
+    sidebar = el("div", {
+      id: "sidebar",
+      style: [
+        "position:absolute",
+        "left:16px",
+        "top:16px",
+        "width:360px",
+        "max-width:calc(100vw - 32px)",
+        "background:rgba(18,22,28,0.82)",
+        "border:1px solid rgba(255,255,255,0.08)",
+        "backdrop-filter:blur(10px)",
+        "border-radius:14px",
+        "padding:14px",
+        "color:#e9eef7",
+        "font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif",
+        "font-size:13px",
+        "line-height:1.35",
+        "z-index:5"
+      ].join(";")
+    });
+    root.appendChild(sidebar);
+  }
+
+  // Ensure canvas holder
+  let stage = qs("#stage");
+  if (!stage) {
+    stage = el("div", { id: "stage", style: "position:absolute; inset:0;" });
+    root.appendChild(stage);
+  }
+
+  // Sidebar UI
+  sidebar.innerHTML = "";
+  const title = el("div", { style: "font-weight:800; font-size:16px; margin-bottom:10px;", text: "Ball Drop Raffle" });
+
+  const btnRow = el("div", { style: "display:flex; gap:8px; flex-wrap:wrap; margin-bottom:10px;" });
+  const btnReset = el("button", { type: "button" });
+  btnReset.textContent = "Reset";
+  const btnStart = el("button", { type: "button" });
+  btnStart.textContent = "Start";
+  const btnShake = el("button", { type: "button" });
+  btnShake.textContent = "Shake";
+
+  [btnReset, btnStart, btnShake].forEach(b => {
+    b.style.cssText = [
+      "background:rgba(255,255,255,0.06)",
+      "border:1px solid rgba(255,255,255,0.14)",
+      "color:#e9eef7",
+      "padding:7px 10px",
+      "border-radius:10px",
+      "cursor:pointer",
+      "font-weight:700"
+    ].join(";");
+  });
+
+  btnRow.append(btnReset, btnStart, btnShake);
+
+  const optRow = el("div", { style: "display:flex; gap:12px; align-items:center; margin-bottom:8px; flex-wrap:wrap;" });
+  const chkFollow = el("input", { type: "checkbox", id: "followLeader" });
+  chkFollow.checked = CFG.FOLLOW_LEADER_DEFAULT;
+  const lblFollow = el("label", { for: "followLeader", style: "cursor:pointer; user-select:none;" });
+  lblFollow.textContent = "Follow leader";
+  optRow.append(chkFollow, lblFollow);
+
+  const status = el("div", { style: "opacity:0.9; margin:8px 0 10px 0;" });
+  status.textContent = "Ready.";
+
+  const hr = el("div", { style: "height:1px; background:rgba(255,255,255,0.10); margin:10px 0;" });
+
+  const scoreBox = el("div");
+  const scoreTitle = el("div", { style: "font-weight:900; margin-bottom:6px;" });
+  scoreTitle.textContent = "Results";
+
+  const liveTitle = el("div", { style: "font-weight:800; margin:8px 0 4px;" });
+  liveTitle.textContent = "Live Leaders (Top 5)";
+
+  const liveList = el("ol", { style: "margin:0 0 10px 18px; padding:0;" });
+
+  const finalTitle = el("div", { style: "font-weight:800; margin:8px 0 4px;" });
+  finalTitle.textContent = "Final Results (Top 10)";
+
+  const finalList = el("ol", { style: "margin:0 0 0 18px; padding:0;" });
+
+  scoreBox.append(scoreTitle, liveTitle, liveList, finalTitle, finalList);
+
+  sidebar.append(title, btnRow, optRow, status, hr, scoreBox);
+
+  // =========================
+  // STATE
+  // =========================
+  let engine, world, render, runner;
   let balls = [];
-  let finishOrder = [];
-  let started = false;
-  let built = false;
-  let followLeader = true;
-  let staggerRelease = true;
+  let pegs = [];
+  let flippers = [];
+  let floorY = 0;
+  let finishY = 0;
 
-  let finishSensor = null;
-  let kickers = [];
+  let running = false;
+  let finishedIds = new Set();
+  let finishOrder = []; // {id, name, num, t}
+  let lastFinishScan = 0;
 
-  // Example players: you likely populate this from your list UI
-  // Each item: { id:number, name:string }
-  let players = [];
+  // Example "names" (replace with your actual list if you want)
+  // If you already load names elsewhere, just set window.RAFFLE_NAMES = [...]
+  const names = Array.isArray(window.RAFFLE_NAMES) && window.RAFFLE_NAMES.length
+    ? window.RAFFLE_NAMES.slice()
+    : Array.from({ length: CFG.BALL_COUNT }, (_, i) => `Player ${i + 1}`);
 
-  // ---------- UTIL ----------
-  const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
-
-  function setMsg(s) {
-    if (elMsg) elMsg.textContent = s || "";
+  // =========================
+  // BUILD WORLD
+  // =========================
+  function destroyWorld() {
+    if (render) {
+      Render.stop(render);
+      render.canvas.remove();
+      render.textures = {};
+    }
+    if (runner) Runner.stop(runner);
+    engine = null;
+    world = null;
+    render = null;
+    runner = null;
+    balls = [];
+    pegs = [];
+    flippers = [];
+    running = false;
+    finishedIds.clear();
+    finishOrder = [];
+    lastFinishScan = 0;
+    liveList.innerHTML = "";
+    finalList.innerHTML = "";
   }
 
-  function clearUI() {
-    if (elLive) elLive.innerHTML = "";
-    if (elFinish) elFinish.innerHTML = "";
-  }
+  function buildWorld() {
+    destroyWorld();
 
-  function ensurePlayersFallback_() {
-    // If your UI populates players elsewhere, remove this fallback.
-    if (players.length) return;
-    // fallback: 1..50
-    for (let i = 1; i <= 50; i++) players.push({ id: i, name: `Player ${i}` });
-  }
-
-  function playerById_(id) {
-    return players.find(p => p.id === id) || { id, name: "" };
-  }
-
-  // ---------- INIT ----------
-  function initEngine_() {
     engine = Engine.create();
-    engine.gravity.y = CFG.gravity;
+    world = engine.world;
+    world.gravity.y = CFG.GRAVITY_Y;
 
-    runner = Runner.create();
+    const w = window.innerWidth;
+    const h = window.innerHeight;
 
+    // World height big enough for long fall
+    const worldW = Math.max(1200, w);
+    const worldH = Math.max(2600, h * 2.2);
+
+    floorY = worldH - 120;
+    finishY = floorY - CFG.FINISH_Y_PADDING;
+
+    // Walls
+    const wallL = Bodies.rectangle(-CFG.WALL_THICKNESS / 2, worldH / 2, CFG.WALL_THICKNESS, worldH * 2, { isStatic: true });
+    const wallR = Bodies.rectangle(worldW + CFG.WALL_THICKNESS / 2, worldH / 2, CFG.WALL_THICKNESS, worldH * 2, { isStatic: true });
+    const floor = Bodies.rectangle(worldW / 2, floorY + CFG.WALL_THICKNESS / 2, worldW * 2, CFG.WALL_THICKNESS, { isStatic: true });
+
+    World.add(world, [wallL, wallR, floor]);
+
+    // Peg grid
+    const startX = CFG.PEG_OFFSET_X;
+    const startY = CFG.PEG_OFFSET_Y;
+    for (let r = 0; r < CFG.PEG_ROWS; r++) {
+      for (let c = 0; c < CFG.PEG_COLS; c++) {
+        const x = startX + c * CFG.PEG_SPACING + (r % 2 ? CFG.PEG_SPACING / 2 : 0);
+        const y = startY + r * CFG.PEG_SPACING;
+        const peg = Bodies.circle(x, y, CFG.PEG_RADIUS, {
+          isStatic: true,
+          render: { fillStyle: "rgba(140,160,190,0.22)" }
+        });
+        pegs.push(peg);
+      }
+    }
+    World.add(world, pegs);
+
+    // Random diagonal bars (keep what you already liked)
+    const bars = [];
+    function addBar(x, y, length, angle) {
+      const bar = Bodies.rectangle(x, y, length, 14, {
+        isStatic: true,
+        angle,
+        render: { fillStyle: "rgba(80,100,140,0.28)" }
+      });
+      bars.push(bar);
+    }
+    addBar(220, 520, 520, 0.85);
+    addBar(980, 380, 420, -0.85);
+    addBar(820, 980, 380, 0.65);
+    addBar(360, 1220, 520, -0.75);
+    addBar(980, 1520, 520, 0.70);
+    addBar(280, 1780, 520, -0.70);
+    addBar(980, 2080, 520, 0.70);
+    World.add(world, bars);
+
+    // Twitch flippers: 3 left + 3 right at 1/3 and 2/3 height zones
+    flippers = buildTwitchFlippers_(worldW, worldH);
+    World.add(world, flippers.map(f => f.body));
+
+    // Balls (stagger spawn at top)
+    balls = [];
+    for (let i = 0; i < CFG.BALL_COUNT; i++) {
+      const x = worldW / 2 + (Math.random() * 220 - 110);
+      const y = 40 + i * 10; // stagger
+      const b = Bodies.circle(x, y, CFG.BALL_RADIUS, {
+        restitution: CFG.BALL_RESTITUTION,
+        friction: CFG.BALL_FRICTION,
+        frictionAir: CFG.BALL_FRICTION_AIR,
+        density: CFG.BALL_DENSITY,
+        render: { fillStyle: pickColor_(i) }
+      });
+
+      // IMPORTANT: store id/num/name on the body itself
+      b.plugin = b.plugin || {};
+      b.plugin.raffle = {
+        num: i + 1,
+        name: names[i] || `Player ${i + 1}`
+      };
+
+      balls.push(b);
+    }
+    World.add(world, balls);
+
+    // Render
     render = Render.create({
-      canvas,
+      element: stage,
       engine,
       options: {
-        width: canvas.clientWidth || 1000,
-        height: canvas.clientHeight || 800,
+        width: w,
+        height: h,
         wireframes: false,
-        background: "rgba(0,0,0,0)",
+        background: "#0b0d10",
         hasBounds: true,
         pixelRatio: window.devicePixelRatio || 1
       }
     });
 
-    // Keep canvas sized to container
-    resizeCanvas_();
-    window.addEventListener("resize", resizeCanvas_);
+    Render.run(render);
 
-    // Draw labels AFTER Matter renders bodies so labels stay glued to balls in WORLD coords
+    runner = Runner.create();
+    Runner.run(runner, engine);
+
+    // Draw labels INSIDE the canvas (this is the core fix)
     Events.on(render, "afterRender", () => {
       drawBallLabels_();
+      drawFinishLine_();
     });
 
-    // Update scoreboard + camera + kickers
-    Events.on(engine, "beforeUpdate", (evt) => {
-      if (!built) return;
-      updateKickers_(evt.timestamp || performance.now());
+    // Tick logic (camera follow + finish detection + flipper twitch)
+    Events.on(engine, "beforeUpdate", () => {
+      if (chkFollow.checked) updateCameraFollow_();
+      scanFinishers_();
+      twitchFlippers_();
       updateScoreboard_();
-      if (followLeader) updateCamera_();
     });
 
-    // Finish sensor
-    Events.on(engine, "collisionStart", (e) => {
-      if (!started || !finishSensor) return;
-      for (const pair of e.pairs) {
-        const a = pair.bodyA;
-        const b = pair.bodyB;
-        if (a === finishSensor && b.label === "ball") recordFinish_(b);
-        if (b === finishSensor && a.label === "ball") recordFinish_(a);
-      }
-    });
+    // Resize
+    window.addEventListener("resize", onResize_);
+
+    status.textContent = "Course built. Click Start.";
   }
 
-  function resizeCanvas_() {
-    if (!render) return;
-    const rect = canvas.getBoundingClientRect();
-    Render.setSize(render, Math.max(300, Math.floor(rect.width)), Math.max(300, Math.floor(rect.height)));
-  }
+  // =========================
+  // FLIPPERS
+  // =========================
+  function buildTwitchFlippers_(worldW, worldH) {
+    const out = [];
+    const leftX = Math.round(worldW * 0.18);
+    const rightX = Math.round(worldW * 0.82);
 
-  // ---------- COURSE BUILD ----------
-  function resetAll_() {
-    started = false;
-    built = false;
-    balls = [];
-    finishOrder = [];
-    kickers = [];
-    finishSensor = null;
-    clearUI();
-    setMsg("");
+    const y1 = Math.round(worldH * 0.33);
+    const y2 = Math.round(worldH * 0.52);
+    const y3 = Math.round(worldH * 0.70);
 
-    if (render) {
-      Render.stop(render);
-      render.canvas.getContext("2d").setTransform(1, 0, 0, 1, 0, 0);
-      render.canvas.getContext("2d").clearRect(0, 0, render.canvas.width, render.canvas.height);
+    const ys = [y1, y2, y3];
+
+    for (let i = 0; i < CFG.FLIPPER_COUNT_PER_SIDE; i++) {
+      out.push(makeFlipper_(leftX, ys[i], +1));
+      out.push(makeFlipper_(rightX, ys[i], -1));
     }
-    if (runner) Runner.stop(runner);
+    return out;
 
-    engine = null;
-    runner = null;
-    render = null;
-
-    initEngine_();
-  }
-
-  function buildCourse_() {
-    ensurePlayersFallback_();
-
-    // wipe world
-    World.clear(engine.world, false);
-    Engine.clear(engine);
-    balls = [];
-    finishOrder = [];
-    kickers = [];
-    finishSensor = null;
-    clearUI();
-
-    const w = CFG.width;
-    const h = CFG.height;
-
-    // Outer walls (tilted) + floor
-    const thick = CFG.wallThickness;
-    const tilt = (CFG.wallTiltDeg * Math.PI) / 180;
-
-    const leftWall = Bodies.rectangle(-thick / 2, h / 2, thick, h * 2, {
-      isStatic: true,
-      render: { fillStyle: "rgba(40,55,90,0.35)" }
-    });
-    Body.setAngle(leftWall, tilt);
-
-    const rightWall = Bodies.rectangle(w + thick / 2, h / 2, thick, h * 2, {
-      isStatic: true,
-      render: { fillStyle: "rgba(40,55,90,0.35)" }
-    });
-    Body.setAngle(rightWall, -tilt);
-
-    const floor = Bodies.rectangle(w / 2, h + 120, w + 1200, 240, {
-      isStatic: true,
-      render: { fillStyle: "rgba(30,30,30,0.85)" }
-    });
-
-    // Pegs
-    const pegs = [];
-    const startX = CFG.pegMargin;
-    const endX = w - CFG.pegMargin;
-    const startY = 140;
-    const endY = h - 350;
-
-    let row = 0;
-    for (let y = startY; y <= endY; y += CFG.pegSpacingY) {
-      const offset = (row % 2) * (CFG.pegSpacingX / 2);
-      for (let x = startX + offset; x <= endX; x += CFG.pegSpacingX) {
-        pegs.push(
-          Bodies.circle(x, y, CFG.pegRadius, {
-            isStatic: true,
-            render: { fillStyle: "rgba(160,170,190,0.18)" }
-          })
-        );
-      }
-      row++;
-    }
-
-    // A few diagonal ramps (static)
-    const ramps = [
-      { x: w * 0.25, y: h * 0.28, len: 320, ang: 0.9 },
-      { x: w * 0.72, y: h * 0.18, len: 380, ang: -0.95 },
-      { x: w * 0.62, y: h * 0.46, len: 300, ang: 0.55 },
-      { x: w * 0.40, y: h * 0.62, len: 260, ang: -0.65 },
-      { x: w * 0.78, y: h * 0.74, len: 420, ang: -0.85 }
-    ].map(r =>
-      Bodies.rectangle(r.x, r.y, r.len, CFG.rampThickness, {
+    function makeFlipper_(x, y, dir) {
+      const body = Bodies.rectangle(x, y, CFG.FLIPPER_W, CFG.FLIPPER_H, {
         isStatic: true,
-        angle: r.ang,
-        render: { fillStyle: "rgba(65,90,145,0.35)" }
-      })
-    );
-
-    // Finish sensor (invisible)
-    finishSensor = Bodies.rectangle(w / 2, CFG.finishY, w * 0.78, CFG.finishSensorHeight, {
-      isStatic: true,
-      isSensor: true,
-      render: { visible: false },
-      label: "finishSensor"
-    });
-
-    // Twitch kickers (kinematic-ish: isStatic true but we move them each tick)
-    buildKickers_();
-
-    World.add(engine.world, [leftWall, rightWall, floor, finishSensor, ...pegs, ...ramps, ...kickers.map(k => k.body)]);
-
-    built = true;
-    setMsg("Course built. Ready.");
-    updateScoreboard_();
-    resetCamera_();
-    Render.run(render);
-  }
-
-  function buildKickers_() {
-    const w = CFG.width;
-    const leftX = w * 0.18;
-    const rightX = w * 0.82;
-
-    const ys = [
-      CFG.height * 0.28,
-      CFG.height * 0.48,
-      CFG.height * 0.68
-    ];
-
-    const makeKicker = (x, y, phase) => {
-      const body = Bodies.rectangle(x, y, CFG.kickerWidth, CFG.kickerHeight, {
-        isStatic: true,
-        friction: 0,
-        frictionStatic: 0,
-        restitution: 0.9,
-        render: { fillStyle: "rgba(90,140,255,0.30)" }
+        angle: dir * 0.35,
+        render: { fillStyle: "rgba(90,110,150,0.32)" }
       });
-
-      // slight angle helps “flick” sideways too
-      Body.setAngle(body, (Math.random() * 0.5 - 0.25));
 
       return {
         body,
-        base: { x, y },
-        phase,
-        speed: CFG.kickerSpeedMin + Math.random() * (CFG.kickerSpeedMax - CFG.kickerSpeedMin),
-        amp: CFG.kickerAmplitude * (0.7 + Math.random() * 0.6)
+        dir,
+        baseAngle: body.angle,
+        targetAngle: body.angle,
+        nextTwitchAt: performance.now() + rand_(CFG.FLIPPER_TWITCH_INTERVAL_MS_MIN, CFG.FLIPPER_TWITCH_INTERVAL_MS_MAX),
+        mode: "idle"
       };
-    };
-
-    kickers = [];
-    for (let i = 0; i < CFG.kickerCountPerSide; i++) {
-      kickers.push(makeKicker(leftX, ys[i % ys.length], Math.random() * Math.PI * 2));
-      kickers.push(makeKicker(rightX, ys[i % ys.length], Math.random() * Math.PI * 2));
     }
   }
 
-  function updateKickers_(t) {
-    if (!kickers.length) return;
-    // oscillate vertically (twitch), with a little randomness
-    const time = t * 0.001;
-    for (const k of kickers) {
-      const dy = Math.sin(time / k.speed + k.phase) * k.amp;
-      const ny = k.base.y + dy;
+  function twitchFlippers_() {
+    const now = performance.now();
 
-      // move static body by setting position
-      Body.setPosition(k.body, { x: k.base.x, y: ny });
+    for (const f of flippers) {
+      if (now >= f.nextTwitchAt && f.mode === "idle") {
+        // twitch: quickly rotate a bit to kick
+        f.mode = "kick";
+        f.targetAngle = clamp_(f.baseAngle + f.dir * CFG.FLIPPER_MAX_ANGLE, -Math.PI, Math.PI);
+      }
 
-      // micro “twitch” angle
-      const a = k.body.angle;
-      const targetA = Math.sin(time / (k.speed * 1.7) + k.phase) * 0.35;
-      Body.setAngle(k.body, a + (targetA - a) * 0.08);
-    }
-  }
-
-  // ---------- BALLS ----------
-  function spawnBalls_() {
-    balls = [];
-    finishOrder = [];
-    clearUI();
-
-    const w = CFG.width;
-
-    // spawn near top center with slight spread
-    const spawnY = 60;
-    const spread = 220;
-
-    // Use your players[] list
-    for (let i = 0; i < players.length; i++) {
-      const p = players[i];
-      const x = w / 2 + (Math.random() * 2 - 1) * spread;
-      const y = spawnY - i * 1.5; // tiny stagger vertically
-      const ball = Bodies.circle(x, y, CFG.ballRadius, {
-        label: "ball",
-        restitution: CFG.ballRestitution,
-        friction: CFG.ballFriction,
-        frictionAir: CFG.ballFrictionAir,
-        render: {
-          fillStyle: randomBallColor_(p.id),
-          strokeStyle: "rgba(255,255,255,0.15)",
-          lineWidth: 1
+      if (f.mode === "kick") {
+        Body.setAngularVelocity(f.body, f.dir * CFG.FLIPPER_KICK_ANGULAR_VEL);
+        if (Math.abs(f.body.angle - f.targetAngle) < 0.10) {
+          f.mode = "return";
+          f.targetAngle = f.baseAngle;
         }
-      });
-      ball.__pid = p.id; // store player id on body
-      ball.__born = performance.now();
-      balls.push(ball);
-    }
-
-    World.add(engine.world, balls);
-  }
-
-  function randomBallColor_(seed) {
-    // deterministic-ish color from id
-    const r = (seed * 73) % 255;
-    const g = (seed * 151) % 255;
-    const b = (seed * 211) % 255;
-    return `rgb(${clamp(r, 40, 230)},${clamp(g, 40, 230)},${clamp(b, 40, 230)})`;
-  }
-
-  function startRace_() {
-    if (!built) return;
-    started = true;
-    setMsg(`Drop started. First ${CFG.finishTopN} finishers recorded!`);
-
-    // release balls
-    spawnBalls_();
-
-    if (staggerRelease) {
-      // Freeze them initially then release one by one
-      for (const b of balls) Body.setStatic(b, true);
-      let idx = 0;
-      const timer = setInterval(() => {
-        if (!started || idx >= balls.length) {
-          clearInterval(timer);
-          return;
+      } else if (f.mode === "return") {
+        Body.setAngularVelocity(f.body, f.dir * CFG.FLIPPER_RETURN_ANGULAR_VEL);
+        if (Math.abs(f.body.angle - f.targetAngle) < 0.10) {
+          // settle
+          Body.setAngle(f.body, f.baseAngle);
+          Body.setAngularVelocity(f.body, 0);
+          f.mode = "idle";
+          f.nextTwitchAt = now + rand_(CFG.FLIPPER_TWITCH_INTERVAL_MS_MIN, CFG.FLIPPER_TWITCH_INTERVAL_MS_MAX);
         }
-        Body.setStatic(balls[idx], false);
-        idx++;
-      }, 60);
-    }
-
-    Runner.run(runner, engine);
-  }
-
-  function recordFinish_(ball) {
-    if (ball.__finished) return;
-    ball.__finished = true;
-
-    const pid = ball.__pid;
-    finishOrder.push(pid);
-
-    // stop tracking more than finishTopN if you want
-    if (finishOrder.length >= CFG.finishTopN) {
-      // You can stop the engine here if you want:
-      // started = false;
-      // Runner.stop(runner);
-      setMsg(`Top ${CFG.finishTopN} decided!`);
-    }
-  }
-
-  // ---------- SCOREBOARD ----------
-  function updateScoreboard_() {
-    if (!elLive || !elFinish) return;
-
-    // LIVE: rank by "progress" (closest to finish line)
-    // Use y distance to finish sensor (lower distance = better)
-    const live = balls
-      .filter(b => !b.__finished)
-      .map(b => {
-        const dist = Math.max(0, CFG.finishY - b.position.y);
-        return { id: b.__pid, dist };
-      })
-      .sort((a, b) => a.dist - b.dist)
-      .slice(0, CFG.liveTopN);
-
-    // FINISH: exact order recorded
-    const fin = finishOrder.slice(0, CFG.finishTopN);
-
-    // Render live list
-    const liveHtml = [];
-    liveHtml.push(`<div><b>Live Top ${CFG.liveTopN}</b> <span style="opacity:.7">(closest to finish)</span></div>`);
-    if (live.length === 0) {
-      liveHtml.push(`<div style="opacity:.7">Waiting for balls...</div>`);
-    } else {
-      for (let i = 0; i < live.length; i++) {
-        const p = playerById_(live[i].id);
-        liveHtml.push(
-          `<div>${i + 1}. <b>#${p.id}</b> ${escapeHtml_(p.name)} <span style="opacity:.6">(d=${Math.round(live[i].dist)})</span></div>`
-        );
       }
     }
-    elLive.innerHTML = liveHtml.join("");
-
-    // Render finish list
-    const finHtml = [];
-    finHtml.push(`<div style="margin-top:10px"><b>Finish Order</b></div>`);
-    if (fin.length === 0) {
-      finHtml.push(`<div style="opacity:.7">No finishers yet.</div>`);
-    } else {
-      for (let i = 0; i < fin.length; i++) {
-        const p = playerById_(fin[i]);
-        finHtml.push(`<div>${i + 1}. <b>#${p.id}</b> ${escapeHtml_(p.name)}</div>`);
-      }
-    }
-    elFinish.innerHTML = finHtml.join("");
   }
 
-  function escapeHtml_(s) {
-    return String(s || "")
-      .replaceAll("&", "&amp;")
-      .replaceAll("<", "&lt;")
-      .replaceAll(">", "&gt;")
-      .replaceAll('"', "&quot;")
-      .replaceAll("'", "&#039;");
-  }
-
-  // ---------- CAMERA ----------
-  function resetCamera_() {
-    if (!render) return;
-    // default bounds show top portion
-    render.bounds.min.x = 0;
-    render.bounds.min.y = 0;
-    render.bounds.max.x = CFG.width;
-    render.bounds.max.y = 900;
-  }
-
-  function updateCamera_() {
-    if (!balls.length) return;
-
-    // Follow the leading ball (closest to finish) OR the lowest (largest y)
-    let leader = null;
-    let bestDist = Infinity;
-
-    for (const b of balls) {
-      if (b.__finished) continue;
-      const d = Math.max(0, CFG.finishY - b.position.y);
-      if (d < bestDist) {
-        bestDist = d;
-        leader = b;
-      }
-    }
-    if (!leader) return;
-
-    const pad = CFG.cameraPadding;
-    const targetMinX = clamp(leader.position.x - pad, -200, CFG.width - 200);
-    const targetMaxX = clamp(leader.position.x + pad, 200, CFG.width + 200);
-    const targetMinY = clamp(leader.position.y - pad, -200, CFG.height - 200);
-    const targetMaxY = clamp(leader.position.y + pad, 200, CFG.height + 200);
-
-    // Lerp bounds
-    const b = render.bounds;
-    b.min.x += (targetMinX - b.min.x) * CFG.cameraLerp;
-    b.max.x += (targetMaxX - b.max.x) * CFG.cameraLerp;
-    b.min.y += (targetMinY - b.min.y) * CFG.cameraLerp;
-    b.max.y += (targetMaxY - b.max.y) * CFG.cameraLerp;
-
-    // keep aspect ratio stable
-    const viewW = b.max.x - b.min.x;
-    const viewH = b.max.y - b.min.y;
-    const aspect = render.options.width / render.options.height;
-
-    let newW = viewW;
-    let newH = viewH;
-    if (viewW / viewH > aspect) {
-      newH = viewW / aspect;
-    } else {
-      newW = viewH * aspect;
-    }
-
-    const cx = (b.min.x + b.max.x) / 2;
-    const cy = (b.min.y + b.max.y) / 2;
-    b.min.x = cx - newW / 2;
-    b.max.x = cx + newW / 2;
-    b.min.y = cy - newH / 2;
-    b.max.y = cy + newH / 2;
-  }
-
-  // ---------- LABEL DRAW (FIXES “DISINTEGRATION”) ----------
+  // =========================
+  // LABELS — FIXED (draw in canvas)
+  // =========================
   function drawBallLabels_() {
-    if (!render || !balls.length) return;
     const ctx = render.context;
-
     ctx.save();
-    ctx.font = CFG.labelFont;
+
+    // Match Matter.Render view transform
+    const bounds = render.bounds;
+    const w = render.options.width;
+    const h = render.options.height;
+
+    const scaleX = w / (bounds.max.x - bounds.min.x);
+    const scaleY = h / (bounds.max.y - bounds.min.y);
+
+    ctx.scale(scaleX, scaleY);
+    ctx.translate(-bounds.min.x, -bounds.min.y);
+
     ctx.textAlign = "center";
     ctx.textBaseline = "middle";
+    ctx.font = "bold 14px system-ui, -apple-system, Segoe UI, Roboto, Arial";
 
-    // IMPORTANT:
-    // Matter.Render has already applied the correct transform for bounds/zoom on the context
-    // in its own pipeline. Drawing here uses WORLD coordinates automatically.
     for (const b of balls) {
-      const id = b.__pid;
-      if (!id) continue;
+      const meta = b.plugin && b.plugin.raffle;
+      if (!meta) continue;
 
-      // Slightly above center looks nicer
+      // Draw number centered ON the ball every frame
       const x = b.position.x;
       const y = b.position.y;
 
-      // stroke + fill for readability
-      ctx.lineWidth = CFG.labelStrokeW;
-      ctx.strokeStyle = CFG.labelStroke;
-      ctx.fillStyle = CFG.labelColor;
+      // subtle outline for readability
+      ctx.lineWidth = 3;
+      ctx.strokeStyle = "rgba(0,0,0,0.55)";
+      ctx.strokeText(String(meta.num), x, y);
 
-      const txt = String(id);
-
-      ctx.strokeText(txt, x, y);
-      ctx.fillText(txt, x, y);
+      ctx.fillStyle = "rgba(255,255,255,0.92)";
+      ctx.fillText(String(meta.num), x, y);
     }
 
     ctx.restore();
   }
 
-  // ---------- SHAKE ----------
-  function shake_() {
-    if (!balls.length) return;
+  function drawFinishLine_() {
+    const ctx = render.context;
+    const bounds = render.bounds;
+    const w = render.options.width;
+    const h = render.options.height;
+
+    const scaleX = w / (bounds.max.x - bounds.min.x);
+    const scaleY = h / (bounds.max.y - bounds.min.y);
+
+    ctx.save();
+    ctx.scale(scaleX, scaleY);
+    ctx.translate(-bounds.min.x, -bounds.min.y);
+
+    ctx.strokeStyle = "rgba(255,255,255,0.08)";
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.moveTo(bounds.min.x, finishY);
+    ctx.lineTo(bounds.max.x, finishY);
+    ctx.stroke();
+
+    ctx.restore();
+  }
+
+  // =========================
+  // SCOREBOARD (clean)
+  // =========================
+  function scanFinishers_() {
+    const now = performance.now();
+    if (now - lastFinishScan < CFG.FINISH_SNAPSHOT_EVERY_MS) return;
+    lastFinishScan = now;
+
     for (const b of balls) {
-      const fx = (Math.random() * 2 - 1) * 0.012;
-      const fy = (Math.random() * 2 - 1) * 0.012;
-      Body.applyForce(b, b.position, { x: fx, y: fy });
+      const meta = b.plugin && b.plugin.raffle;
+      if (!meta) continue;
+
+      if (finishedIds.has(b.id)) continue;
+
+      if (b.position.y >= finishY) {
+        finishedIds.add(b.id);
+        finishOrder.push({
+          id: b.id,
+          num: meta.num,
+          name: meta.name,
+          t: Date.now()
+        });
+      }
     }
   }
 
-  // ---------- UI WIREUP ----------
-  function hookUI_() {
-    if (elBuild) elBuild.addEventListener("click", () => {
-      buildCourse_();
-    });
+  function updateScoreboard_() {
+    // Live leaders: closest to finish (largest y), excluding finished
+    const live = balls
+      .filter(b => !finishedIds.has(b.id))
+      .map(b => {
+        const meta = b.plugin.raffle;
+        return {
+          id: b.id,
+          num: meta.num,
+          name: meta.name,
+          y: b.position.y
+        };
+      })
+      .sort((a, b) => b.y - a.y)
+      .slice(0, CFG.LIVE_LEADERS_COUNT);
 
-    if (elStart) elStart.addEventListener("click", () => {
-      if (!built) return;
-      started = true;
-      staggerRelease = !!(elStagger && elStagger.checked);
-      followLeader = !!(elFollow && elFollow.checked);
-      startRace_();
-    });
+    // Final results (finish order)
+    const final = finishOrder.slice(0, CFG.FINAL_RESULTS_COUNT);
 
-    if (elReset) elReset.addEventListener("click", () => {
-      resetAll_();
-      setMsg("Reset done.");
-    });
+    // Render lists
+    liveList.innerHTML = "";
+    if (live.length === 0) {
+      liveList.appendChild(el("li", { text: "(waiting for balls...)" }));
+    } else {
+      for (const p of live) {
+        liveList.appendChild(el("li", { text: `${p.name} (#${p.num})` }));
+      }
+    }
 
-    if (elShake) elShake.addEventListener("click", () => {
-      shake_();
-    });
+    finalList.innerHTML = "";
+    if (final.length === 0) {
+      finalList.appendChild(el("li", { text: "(no finishers yet)" }));
+    } else {
+      for (const p of final) {
+        finalList.appendChild(el("li", { text: `${p.name} (#${p.num})` }));
+      }
+    }
 
-    if (elFollow) elFollow.addEventListener("change", () => {
-      followLeader = !!elFollow.checked;
-      if (!followLeader) resetCamera_();
-    });
-
-    if (elStagger) elStagger.addEventListener("change", () => {
-      staggerRelease = !!elStagger.checked;
-    });
+    // Status message
+    if (running && final.length >= CFG.FINAL_RESULTS_COUNT) {
+      status.textContent = `Top ${CFG.FINAL_RESULTS_COUNT} decided.`;
+      running = false;
+    }
   }
 
-  // ---------- BOOT ----------
-  function boot_() {
-    resetAll_();
-    hookUI_();
-    setMsg("Ready. Click Build Course.");
+  // =========================
+  // CAMERA FOLLOW
+  // =========================
+  function updateCameraFollow_() {
+    // Follow "leader" = highest y (closest to finish), regardless of finished state
+    let leader = balls[0];
+    for (const b of balls) {
+      if (b.position.y > leader.position.y) leader = b;
+    }
+
+    const bounds = render.bounds;
+
+    const viewW = bounds.max.x - bounds.min.x;
+    const viewH = bounds.max.y - bounds.min.y;
+
+    const targetCenter = {
+      x: leader.position.x,
+      y: leader.position.y
+    };
+
+    // clamp camera so it doesn't go beyond world-ish ranges
+    const desiredMin = {
+      x: targetCenter.x - viewW / 2,
+      y: targetCenter.y - viewH / 2
+    };
+
+    const desiredMax = {
+      x: desiredMin.x + viewW,
+      y: desiredMin.y + viewH
+    };
+
+    // lerp
+    bounds.min.x += (desiredMin.x - bounds.min.x) * CFG.CAMERA_LERP;
+    bounds.min.y += (desiredMin.y - bounds.min.y) * CFG.CAMERA_LERP;
+    bounds.max.x += (desiredMax.x - bounds.max.x) * CFG.CAMERA_LERP;
+    bounds.max.y += (desiredMax.y - bounds.max.y) * CFG.CAMERA_LERP;
   }
 
-  boot_();
+  // =========================
+  // ACTIONS
+  // =========================
+  function startRace() {
+    running = true;
+    status.textContent = "Drop started. Recording finishers...";
+  }
+
+  function shake() {
+    for (const b of balls) {
+      const fx = (Math.random() - 0.5) * 0.03 * b.mass;
+      const fy = (Math.random() - 0.5) * 0.03 * b.mass;
+      Body.applyForce(b, b.position, { x: fx, y: fy });
+    }
+    status.textContent = "Shaken.";
+  }
+
+  // =========================
+  // EVENTS
+  // =========================
+  btnReset.addEventListener("click", () => buildWorld());
+  btnStart.addEventListener("click", () => startRace());
+  btnShake.addEventListener("click", () => shake());
+
+  function onResize_() {
+    if (!render) return;
+    render.options.width = window.innerWidth;
+    render.options.height = window.innerHeight;
+    render.canvas.width = window.innerWidth * (window.devicePixelRatio || 1);
+    render.canvas.height = window.innerHeight * (window.devicePixelRatio || 1);
+    render.canvas.style.width = window.innerWidth + "px";
+    render.canvas.style.height = window.innerHeight + "px";
+  }
+
+  // =========================
+  // HELPERS
+  // =========================
+  function pickColor_(i) {
+    const palette = [
+      "#63D471", "#FFD166", "#EF476F", "#06D6A0", "#118AB2",
+      "#F78C6B", "#C792EA", "#82AAFF", "#FFCB6B", "#A3F7BF"
+    ];
+    return palette[i % palette.length];
+  }
+
+  function rand_(min, max) {
+    return min + Math.random() * (max - min);
+  }
+
+  function clamp_(v, a, b) {
+    return Math.max(a, Math.min(b, v));
+  }
+
+  // =========================
+  // INIT
+  // =========================
+  buildWorld();
 })();
