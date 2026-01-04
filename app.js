@@ -1,43 +1,26 @@
-/* app.js — Ball Drop Raffle (FULL FIX)
-   - No auto-start (gravity OFF until Start)
-   - Numbers stay ON the balls (canvas draw, not DOM labels)
-   - Clean scoreboard: 1st Name (#), 2nd Name (#), ...
-   - Finish line is visible + sensor-based finishing
-   - Build Course / Start / Reset / Shake all work
-
-   Requires Matter.js loaded first (matter.min.js)
+/* app.js — Ball Drop Raffle (CANVAS LABELS FIX + CLEAN TOP 5 + WORKS WITH EXISTING UI)
+   Requires matter.min.js loaded before this file.
 */
 
 (() => {
-  const {
-    Engine,
-    Render,
-    Runner,
-    World,
-    Bodies,
-    Body,
-    Composite,
-    Events,
-    Vector
-  } = Matter;
+  if (!window.Matter) {
+    console.error("Matter.js not found. Load matter.min.js before app.js");
+    return;
+  }
 
-  // =========================
-  // CONFIG
-  // =========================
+  const { Engine, Render, Runner, World, Bodies, Body, Events } = Matter;
+
   const CFG = {
-    // Balls
-    BALL_COUNT: 50,
+    BALL_COUNT_DEFAULT: 50,
     BALL_RADIUS: 14,
     BALL_RESTITUTION: 0.45,
     BALL_FRICTION: 0.04,
     BALL_FRICTION_AIR: 0.012,
     BALL_DENSITY: 0.002,
 
-    // World
     GRAVITY_Y: 1.05,
     WALL_THICKNESS: 80,
 
-    // Course
     PEG_ROWS: 14,
     PEG_COLS: 14,
     PEG_RADIUS: 6,
@@ -45,290 +28,278 @@
     PEG_OFFSET_X: 160,
     PEG_OFFSET_Y: 130,
 
-    // Finish
-    FINISH_Y_PADDING: 160,
-    FINISH_BAR_H: 22,
-    FINISH_BAR_FILL: "rgba(255,255,255,0.08)",
-    FINISH_BAR_STROKE: "rgba(255,255,255,0.14)",
+    FINISH_Y_PADDING: 140,
+    FINISH_SCAN_MS: 150,
 
-    // Camera follow
-    FOLLOW_LEADER_DEFAULT: true,
-    CAMERA_LERP: 0.14,
+    FOLLOW_LERP: 0.14,
 
-    // UI
-    FINAL_RESULTS_COUNT: 10, // what you show
-    TOP5_COUNT: 5,
+    LIVE_COUNT: 5,
+    FINAL_COUNT: 5,
 
-    // Flippers ("twitch bars")
-    FLIPPER_COUNT_PER_SIDE: 3,
     FLIPPER_W: 110,
     FLIPPER_H: 16,
-    FLIPPER_TWITCH_INTERVAL_MS_MIN: 450,
-    FLIPPER_TWITCH_INTERVAL_MS_MAX: 1100,
-    FLIPPER_KICK_ANGULAR_VEL: 0.55,
-    FLIPPER_RETURN_ANGULAR_VEL: -0.40,
-    FLIPPER_MAX_ANGLE: 0.90
+    FLIPPER_KICK_ANGVEL: 0.60,
+    FLIPPER_RETURN_ANGVEL: -0.45,
+    FLIPPER_MAX_DELTA: 0.90,
+    FLIPPER_TWITCH_MIN: 450,
+    FLIPPER_TWITCH_MAX: 1100
   };
 
-  // =========================
-  // DOM HELPERS
-  // =========================
-  function qs(sel) { return document.querySelector(sel); }
-  function el(tag, attrs = {}, children = []) {
-    const n = document.createElement(tag);
-    Object.entries(attrs).forEach(([k, v]) => {
-      if (k === "class") n.className = v;
-      else if (k === "text") n.textContent = v;
-      else n.setAttribute(k, v);
-    });
-    children.forEach(c => n.appendChild(c));
-    return n;
+  // -------------------------
+  // DOM helpers (NO sidebar rewrite)
+  // -------------------------
+  const qs = (s) => document.querySelector(s);
+  const qsa = (s) => Array.from(document.querySelectorAll(s));
+
+  function findButtonByText(txt) {
+    const t = txt.trim().toLowerCase();
+    const btns = qsa("button, input[type='button'], input[type='submit']");
+    for (const b of btns) {
+      const label = (b.tagName === "INPUT" ? (b.value || "") : (b.textContent || "")).trim().toLowerCase();
+      if (label === t) return b;
+    }
+    return null;
   }
 
-  // =========================
-  // ENSURE ROOT + UI
-  // =========================
-  let root = qs("#app");
-  if (!root) {
-    root = el("div", { id: "app", style: "position:fixed; inset:0; background:#0b0d10;" });
-    document.body.appendChild(root);
+  function getEl() {
+    // Try common ids first (safe)
+    const btnBuild = qs("#btnBuild") || qs("#buildBtn") || findButtonByText("Build Course");
+    const btnStart = qs("#btnStart") || qs("#startBtn") || findButtonByText("Start");
+    const btnReset = qs("#btnReset") || qs("#resetBtn") || findButtonByText("Reset");
+    const btnShake = qs("#btnShake") || qs("#shakeBtn") || findButtonByText("Shake");
+
+    const chkFollow = qs("#followLeader") || qs("#chkFollow") || qsa("input[type='checkbox']").find(x => (x.id || "").toLowerCase().includes("follow"));
+    const chkStagger = qs("#staggerRelease") || qs("#chkStagger") || qsa("input[type='checkbox']").find(x => (x.id || "").toLowerCase().includes("stagger"));
+
+    const namesInput =
+      qs("#namesInput") ||
+      qs("#participants") ||
+      qs("textarea") ||
+      null;
+
+    // Score container: try ids, otherwise the first box that contains "Top" text
+    const scoreRoot =
+      qs("#scoreboard") ||
+      qs("#results") ||
+      qsa("div").find(d => (d.textContent || "").includes("Top 5")) ||
+      null;
+
+    // Stage container
+    const stage =
+      qs("#stage") ||
+      qs("#canvas") ||
+      qs("#game") ||
+      qs("main") ||
+      document.body;
+
+    return { btnBuild, btnStart, btnReset, btnShake, chkFollow, chkStagger, namesInput, scoreRoot, stage };
   }
 
-  let sidebar = qs("#sidebar");
-  if (!sidebar) {
-    sidebar = el("div", {
-      id: "sidebar",
-      style: [
-        "position:absolute",
-        "left:16px",
-        "top:16px",
-        "width:380px",
-        "max-width:calc(100vw - 32px)",
-        "background:rgba(18,22,28,0.82)",
-        "border:1px solid rgba(255,255,255,0.08)",
-        "backdrop-filter:blur(10px)",
-        "border-radius:14px",
-        "padding:14px",
-        "color:#e9eef7",
-        "font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif",
-        "font-size:13px",
-        "line-height:1.35",
-        "z-index:5"
-      ].join(";")
-    });
-    root.appendChild(sidebar);
-  }
+  const UI = getEl();
 
-  let stage = qs("#stage");
-  if (!stage) {
-    stage = el("div", { id: "stage", style: "position:absolute; inset:0;" });
-    root.appendChild(stage);
-  }
-
-  sidebar.innerHTML = "";
-
-  const title = el("div", { style: "font-weight:900; font-size:16px; margin-bottom:10px;", text: "Ball Drop Raffle" });
-
-  const namesBox = el("textarea", {
-    id: "namesBox",
-    placeholder: "One participant per line\n1. Alice\n2. Bob\n3. Chris",
-    style: [
-      "width:100%",
-      "height:120px",
-      "resize:vertical",
-      "background:rgba(255,255,255,0.06)",
-      "border:1px solid rgba(255,255,255,0.14)",
-      "color:#e9eef7",
-      "border-radius:10px",
-      "padding:10px",
-      "outline:none",
-      "font-weight:600"
-    ].join(";")
-  });
-
-  const btnRow1 = el("div", { style: "display:flex; gap:8px; flex-wrap:wrap; margin:10px 0;" });
-  const btnBuild = el("button", { type: "button" }); btnBuild.textContent = "Build Course";
-  const btnStart = el("button", { type: "button" }); btnStart.textContent = "Start";
-  const btnReset = el("button", { type: "button" }); btnReset.textContent = "Reset";
-  const btnShake = el("button", { type: "button" }); btnShake.textContent = "Shake";
-
-  [btnBuild, btnStart, btnReset, btnShake].forEach(b => {
-    b.style.cssText = [
-      "background:rgba(255,255,255,0.06)",
-      "border:1px solid rgba(255,255,255,0.14)",
-      "color:#e9eef7",
-      "padding:7px 10px",
-      "border-radius:10px",
-      "cursor:pointer",
-      "font-weight:800"
-    ].join(";");
-  });
-
-  btnRow1.append(btnBuild, btnStart, btnReset, btnShake);
-
-  const optRow = el("div", { style: "display:flex; gap:10px; align-items:center; margin-bottom:8px; flex-wrap:wrap;" });
-  const chkFollow = el("input", { type: "checkbox", id: "followLeader" });
-  chkFollow.checked = CFG.FOLLOW_LEADER_DEFAULT;
-  const lblFollow = el("label", { for: "followLeader", style: "cursor:pointer; user-select:none; font-weight:700;" });
-  lblFollow.textContent = "Follow leader";
-  optRow.append(chkFollow, lblFollow);
-
-  const status = el("div", { style: "opacity:0.95; margin:8px 0 10px 0; font-weight:700;" });
-  status.textContent = "Paste names → Build Course → Start";
-
-  const hr = el("div", { style: "height:1px; background:rgba(255,255,255,0.10); margin:10px 0;" });
-
-  const scoreTitle = el("div", { style: "font-weight:900; margin-bottom:6px;", text: "Scoreboard" });
-
-  const top5Title = el("div", { style: "font-weight:800; margin:8px 0 4px;", text: "Top 5 (Finish Order)" });
-  const top5List = el("ol", { style: "margin:0 0 10px 18px; padding:0;" });
-
-  const finalTitle = el("div", { style: "font-weight:800; margin:8px 0 4px;", text: "Winners (Finish Order)" });
-  const finalList = el("ol", { style: "margin:0 0 0 18px; padding:0;" });
-
-  sidebar.append(title, namesBox, btnRow1, optRow, status, hr, scoreTitle, top5Title, top5List, finalTitle, finalList);
-
-  // =========================
-  // STATE
-  // =========================
-  let engine, world, render, runner;
+  // If you have a dedicated stage div, we will render into it.
+  // If not, we render into body, but we do NOT touch your sidebar.
+  let engine = null;
+  let render = null;
+  let runner = null;
   let balls = [];
-  let pegs = [];
   let flippers = [];
-  let finishSensor = null;
-
+  let finishY = 0;
   let worldW = 0;
   let worldH = 0;
-  let floorY = 0;
-  let finishY = 0;
 
-  let built = false;
   let started = false;
-
   let finishedIds = new Set();
-  let finishOrder = []; // {id, num, name, ms}
+  let finishOrder = [];
+  let lastFinishScan = 0;
 
-  // Kill any old DOM labels from previous versions if they exist
-  function cleanupLegacyLabels_() {
-    const olds = document.querySelectorAll(".ball-label, .ballLabel, [data-ball-label]");
-    olds.forEach(n => n.remove());
+  // -------------------------
+  // Scoreboard (clean)
+  // -------------------------
+  let scoreBox = null;
+  let liveList = null;
+  let finalList = null;
+
+  function ensureScoreboardUI_() {
+    if (!UI.scoreRoot) return;
+
+    // Create a clean sub-box inside your existing sidebar section
+    if (!scoreBox) {
+      scoreBox = document.createElement("div");
+      scoreBox.style.cssText = "margin-top:10px; padding-top:8px; border-top:1px solid rgba(255,255,255,0.10);";
+
+      const h = document.createElement("div");
+      h.textContent = "Results";
+      h.style.cssText = "font-weight:800; margin-bottom:6px;";
+
+      const liveH = document.createElement("div");
+      liveH.textContent = "Live Top 5";
+      liveH.style.cssText = "font-weight:700; margin:8px 0 4px;";
+
+      liveList = document.createElement("ol");
+      liveList.style.cssText = "margin:0 0 10px 18px; padding:0;";
+
+      const finalH = document.createElement("div");
+      finalH.textContent = "Final Top 5";
+      finalH.style.cssText = "font-weight:700; margin:8px 0 4px;";
+
+      finalList = document.createElement("ol");
+      finalList.style.cssText = "margin:0 0 0 18px; padding:0;";
+
+      scoreBox.appendChild(h);
+      scoreBox.appendChild(liveH);
+      scoreBox.appendChild(liveList);
+      scoreBox.appendChild(finalH);
+      scoreBox.appendChild(finalList);
+
+      UI.scoreRoot.appendChild(scoreBox);
+    }
+
+    renderScore_();
   }
 
-  // =========================
-  // PARSE NAMES
-  // =========================
+  function renderScore_() {
+    if (!liveList || !finalList) return;
+
+    // Live = closest to finish among NOT finished
+    const live = balls
+      .filter(b => !finishedIds.has(b.id))
+      .map(b => ({
+        y: b.position.y,
+        num: b.plugin && b.plugin.raffle ? b.plugin.raffle.num : 0,
+        name: b.plugin && b.plugin.raffle ? b.plugin.raffle.name : ""
+      }))
+      .sort((a, b) => b.y - a.y)
+      .slice(0, CFG.LIVE_COUNT);
+
+    // Final = finish order
+    const final = finishOrder.slice(0, CFG.FINAL_COUNT);
+
+    liveList.innerHTML = "";
+    if (live.length === 0) {
+      const li = document.createElement("li");
+      li.textContent = "(waiting...)";
+      liveList.appendChild(li);
+    } else {
+      for (let i = 0; i < live.length; i++) {
+        const li = document.createElement("li");
+        li.textContent = `${ordinal_(i + 1)} ${live[i].name} (#${live[i].num})`;
+        liveList.appendChild(li);
+      }
+    }
+
+    finalList.innerHTML = "";
+    if (final.length === 0) {
+      const li = document.createElement("li");
+      li.textContent = "(no finishers yet)";
+      finalList.appendChild(li);
+    } else {
+      for (let i = 0; i < final.length; i++) {
+        const li = document.createElement("li");
+        li.textContent = `${ordinal_(i + 1)} ${final[i].name} (#${final[i].num})`;
+        finalList.appendChild(li);
+      }
+    }
+  }
+
+  function ordinal_(n) {
+    if (n === 1) return "1st";
+    if (n === 2) return "2nd";
+    if (n === 3) return "3rd";
+    return `${n}th`;
+  }
+
+  // -------------------------
+  // Names parsing
+  // -------------------------
   function parseNames_() {
-    const raw = (namesBox.value || "").trim();
-    if (!raw) return [];
-    const lines = raw.split("\n").map(s => s.trim()).filter(Boolean);
-    return lines.map((line, idx) => {
-      // allow "1. Name" or "Name"
-      const m = line.match(/^\s*\d+\s*[\.\)]\s*(.+)$/);
-      return (m ? m[1].trim() : line) || `Player ${idx + 1}`;
-    });
+    const raw = UI.namesInput ? (UI.namesInput.value || "").trim() : "";
+    const lines = raw
+      .split(/\r?\n/g)
+      .map(s => s.trim())
+      .filter(Boolean);
+
+    // If empty, fallback to Player 1..N but DO NOT auto-start anything
+    if (lines.length === 0) {
+      const n = CFG.BALL_COUNT_DEFAULT;
+      return Array.from({ length: n }, (_, i) => `Player ${i + 1}`);
+    }
+
+    // Allow "1. Name" or "1) Name"
+    const cleaned = lines.map(line => line.replace(/^\s*\d+\s*[\.\)]\s*/, "").trim()).filter(Boolean);
+    return cleaned;
   }
 
-  // =========================
-  // DESTROY WORLD
-  // =========================
-  function destroyWorld() {
-    cleanupLegacyLabels_();
-
+  // -------------------------
+  // Build / Destroy
+  // -------------------------
+  function destroyWorld_() {
     if (render) {
-      Render.stop(render);
-      try { render.canvas.remove(); } catch (_) {}
+      try { Render.stop(render); } catch (e) {}
+      if (render.canvas && render.canvas.parentNode) render.canvas.parentNode.removeChild(render.canvas);
       render.textures = {};
     }
-    if (runner) Runner.stop(runner);
-
+    if (runner) {
+      try { Runner.stop(runner); } catch (e) {}
+    }
     engine = null;
-    world = null;
     render = null;
     runner = null;
-
     balls = [];
-    pegs = [];
     flippers = [];
-    finishSensor = null;
-
-    built = false;
     started = false;
-
     finishedIds = new Set();
     finishOrder = [];
-
-    top5List.innerHTML = "";
-    finalList.innerHTML = "";
+    lastFinishScan = 0;
   }
 
-  // =========================
-  // BUILD WORLD (NO AUTO START)
-  // =========================
-  function buildWorld() {
-    destroyWorld();
+  function buildCourse_() {
+    destroyWorld_();
 
     const names = parseNames_();
-    if (names.length === 0) {
-      status.textContent = "Paste at least 1 name first.";
-      return;
-    }
+    const ballCount = Math.min(200, Math.max(1, names.length));
 
     engine = Engine.create();
-    world = engine.world;
-
-    // IMPORTANT: gravity OFF until Start
-    world.gravity.y = 0;
+    engine.world.gravity.y = CFG.GRAVITY_Y;
 
     const w = window.innerWidth;
     const h = window.innerHeight;
 
     worldW = Math.max(1200, w);
-    worldH = Math.max(2600, Math.floor(h * 2.2));
+    worldH = Math.max(2600, h * 2.2);
 
-    floorY = worldH - 120;
+    const floorY = worldH - 120;
     finishY = floorY - CFG.FINISH_Y_PADDING;
 
-    // Walls
+    // Walls + Floor
     const wallL = Bodies.rectangle(-CFG.WALL_THICKNESS / 2, worldH / 2, CFG.WALL_THICKNESS, worldH * 2, { isStatic: true });
     const wallR = Bodies.rectangle(worldW + CFG.WALL_THICKNESS / 2, worldH / 2, CFG.WALL_THICKNESS, worldH * 2, { isStatic: true });
     const floor = Bodies.rectangle(worldW / 2, floorY + CFG.WALL_THICKNESS / 2, worldW * 2, CFG.WALL_THICKNESS, { isStatic: true });
+    World.add(engine.world, [wallL, wallR, floor]);
 
-    World.add(world, [wallL, wallR, floor]);
-
-    // Finish sensor (thin, full width)
-    finishSensor = Bodies.rectangle(worldW / 2, finishY, worldW * 2, CFG.FINISH_BAR_H, {
-      isStatic: true,
-      isSensor: true,
-      render: { visible: false }
-    });
-    World.add(world, finishSensor);
-
-    // Peg grid
-    pegs = [];
-    const startX = CFG.PEG_OFFSET_X;
-    const startY = CFG.PEG_OFFSET_Y;
+    // Pegs
+    const pegs = [];
     for (let r = 0; r < CFG.PEG_ROWS; r++) {
       for (let c = 0; c < CFG.PEG_COLS; c++) {
-        const x = startX + c * CFG.PEG_SPACING + (r % 2 ? CFG.PEG_SPACING / 2 : 0);
-        const y = startY + r * CFG.PEG_SPACING;
-        const peg = Bodies.circle(x, y, CFG.PEG_RADIUS, {
+        const x = CFG.PEG_OFFSET_X + c * CFG.PEG_SPACING + (r % 2 ? CFG.PEG_SPACING / 2 : 0);
+        const y = CFG.PEG_OFFSET_Y + r * CFG.PEG_SPACING;
+        pegs.push(Bodies.circle(x, y, CFG.PEG_RADIUS, {
           isStatic: true,
           render: { fillStyle: "rgba(140,160,190,0.22)" }
-        });
-        pegs.push(peg);
+        }));
       }
     }
-    World.add(world, pegs);
+    World.add(engine.world, pegs);
 
-    // Diagonal bars (your existing style)
+    // Bars (your diagonal stuff)
     const bars = [];
-    function addBar(x, y, length, angle) {
+    const addBar = (x, y, length, angle) => {
       bars.push(Bodies.rectangle(x, y, length, 14, {
         isStatic: true,
         angle,
         render: { fillStyle: "rgba(80,100,140,0.28)" }
       }));
-    }
+    };
     addBar(220, 520, 520, 0.85);
     addBar(980, 380, 420, -0.85);
     addBar(820, 980, 380, 0.65);
@@ -336,38 +307,33 @@
     addBar(980, 1520, 520, 0.70);
     addBar(280, 1780, 520, -0.70);
     addBar(980, 2080, 520, 0.70);
-    World.add(world, bars);
+    World.add(engine.world, bars);
 
-    // Twitch flippers
-    flippers = buildTwitchFlippers_(worldW, worldH);
-    World.add(world, flippers.map(f => f.body));
+    // Twitch flippers (3 left + 3 right)
+    flippers = buildFlippers_(worldW, worldH);
+    World.add(engine.world, flippers.map(f => f.body));
 
-    // Balls (created but "held" until Start)
+    // Balls (spawn held above view until Start)
     balls = [];
-    const count = Math.min(CFG.BALL_COUNT, names.length);
-    for (let i = 0; i < count; i++) {
+    for (let i = 0; i < ballCount; i++) {
       const x = worldW / 2 + (Math.random() * 220 - 110);
-      const y = 60 + i * 26; // staged stack
+      const y = -2000 - i * 40; // kept offscreen until Start
       const b = Bodies.circle(x, y, CFG.BALL_RADIUS, {
         restitution: CFG.BALL_RESTITUTION,
         friction: CFG.BALL_FRICTION,
         frictionAir: CFG.BALL_FRICTION_AIR,
         density: CFG.BALL_DENSITY,
-        // start "frozen"
-        isSleeping: true,
         render: { fillStyle: pickColor_(i) }
       });
-
       b.plugin = b.plugin || {};
-      b.plugin.raffle = { num: i + 1, name: names[i] };
-
+      b.plugin.raffle = { num: i + 1, name: names[i] || `Player ${i + 1}` };
       balls.push(b);
     }
-    World.add(world, balls);
+    World.add(engine.world, balls);
 
     // Render
     render = Render.create({
-      element: stage,
+      element: UI.stage || document.body,
       engine,
       options: {
         width: w,
@@ -380,149 +346,192 @@
     });
 
     Render.run(render);
-
     runner = Runner.create();
     Runner.run(runner, engine);
 
-    // Finish detection via collision with sensor
-    Events.on(engine, "collisionStart", (evt) => {
-      if (!started) return;
-      for (const pair of evt.pairs) {
-        const a = pair.bodyA;
-        const b = pair.bodyB;
-        const ball = (a === finishSensor) ? b : (b === finishSensor ? a : null);
-        if (!ball) continue;
-        if (!ball.plugin || !ball.plugin.raffle) continue;
-        if (finishedIds.has(ball.id)) continue;
-
-        finishedIds.add(ball.id);
-        finishOrder.push({
-          id: ball.id,
-          num: ball.plugin.raffle.num,
-          name: ball.plugin.raffle.name,
-          ms: Date.now()
-        });
-
-        // optional: dampen it after finish
-        Body.setVelocity(ball, { x: 0, y: 0 });
-        Body.setAngularVelocity(ball, 0);
-      }
-    });
-
-    // Draw labels & finish line
+    // Canvas labels that NEVER detach
     Events.on(render, "afterRender", () => {
+      drawBallNumbers_();
       drawFinishLine_();
-      drawBallLabels_();
     });
 
-    // Tick (camera + flippers + scoreboard)
     Events.on(engine, "beforeUpdate", () => {
-      if (chkFollow.checked) updateCameraFollow_();
-      if (started) twitchFlippers_();
-      updateScoreboard_();
+      if (UI.chkFollow && UI.chkFollow.checked) followLeader_();
+      if (started) {
+        scanFinishers_();
+        twitchFlippers_();
+        ensureScoreboardUI_();
+      }
     });
 
     window.addEventListener("resize", onResize_);
 
-    built = true;
-    started = false;
-    status.textContent = "Course built. Click Start.";
-    top5List.innerHTML = "";
-    finalList.innerHTML = "";
+    // Reset scoreboard UI
+    ensureScoreboardUI_();
+
+    console.log("Course built.");
   }
 
-  // =========================
-  // START / RESET / SHAKE
-  // =========================
-  function startRace() {
-    if (!built) {
-      status.textContent = "Build Course first.";
+  // -------------------------
+  // Start / Reset / Shake
+  // -------------------------
+  function start_() {
+    if (!engine || balls.length === 0) {
+      console.warn("Build Course first.");
       return;
     }
-    if (started) {
-      status.textContent = "Already started.";
-      return;
-    }
+    if (started) return;
 
-    // Clear finishes
-    finishedIds = new Set();
-    finishOrder = [];
-    top5List.innerHTML = "";
-    finalList.innerHTML = "";
-
-    // Release balls + enable gravity
-    world.gravity.y = CFG.GRAVITY_Y;
     started = true;
 
-    for (const b of balls) {
-      Body.setSleeping(b, false);
-      // tiny random nudge so they don’t stack perfectly
-      Body.applyForce(b, b.position, { x: (Math.random() - 0.5) * 0.0006, y: 0 });
+    const stagger = UI.chkStagger ? !!UI.chkStagger.checked : true;
+    const dropXCenter = worldW / 2;
+    const baseY = 40;
+
+    // Move balls into the top of the world only when Start is pressed
+    for (let i = 0; i < balls.length; i++) {
+      const b = balls[i];
+      const x = dropXCenter + (Math.random() * 220 - 110);
+      const y = baseY + (stagger ? i * 10 : 0);
+      Body.setPosition(b, { x, y });
+      Body.setVelocity(b, { x: 0, y: 0 });
+      Body.setAngularVelocity(b, 0);
     }
 
-    status.textContent = "Drop started!";
+    ensureScoreboardUI_();
+    console.log("Drop started.");
   }
 
-  function resetAll() {
-    // same as "Build Course" but keeps names text
-    buildWorld();
+  function reset_() {
+    // Rebuild course from current names input
+    buildCourse_();
   }
 
-  function shake() {
-    if (!built) return;
+  function shake_() {
+    if (!engine) return;
     for (const b of balls) {
-      const fx = (Math.random() - 0.5) * 0.0015;
-      const fy = (Math.random() - 0.5) * 0.0015;
+      const fx = (Math.random() - 0.5) * 0.03 * b.mass;
+      const fy = (Math.random() - 0.5) * 0.03 * b.mass;
       Body.applyForce(b, b.position, { x: fx, y: fy });
     }
-    status.textContent = "Shaken.";
   }
 
-  // =========================
-  // SCOREBOARD (CLEAN)
-  // =========================
-  function updateScoreboard_() {
-    // Finish order only. (This is what you wanted.)
-    const winners = finishOrder.slice(0, CFG.FINAL_RESULTS_COUNT);
+  // -------------------------
+  // Finish detection + scoreboard
+  // -------------------------
+  function scanFinishers_() {
+    const now = performance.now();
+    if (now - lastFinishScan < CFG.FINISH_SCAN_MS) return;
+    lastFinishScan = now;
 
-    // Top 5 = first 5 winners
-    const top5 = winners.slice(0, CFG.TOP5_COUNT);
-
-    top5List.innerHTML = "";
-    if (top5.length === 0) {
-      top5List.appendChild(el("li", { text: "(no finishers yet)" }));
-    } else {
-      for (let i = 0; i < top5.length; i++) {
-        const p = top5[i];
-        top5List.appendChild(el("li", { text: `${ordinal_(i + 1)} ${p.name} (#${p.num})` }));
+    for (const b of balls) {
+      if (finishedIds.has(b.id)) continue;
+      if (b.position.y >= finishY) {
+        finishedIds.add(b.id);
+        const meta = b.plugin && b.plugin.raffle ? b.plugin.raffle : { num: 0, name: "" };
+        finishOrder.push({ id: b.id, num: meta.num, name: meta.name, t: Date.now() });
+        if (finishOrder.length >= CFG.FINAL_COUNT) {
+          // lock after top 5
+          // we keep sim running visually, but scoreboard stays top 5
+        }
       }
-    }
-
-    finalList.innerHTML = "";
-    if (winners.length === 0) {
-      finalList.appendChild(el("li", { text: "(no finishers yet)" }));
-    } else {
-      for (let i = 0; i < winners.length; i++) {
-        const p = winners[i];
-        finalList.appendChild(el("li", { text: `${ordinal_(i + 1)} ${p.name} (#${p.num})` }));
-      }
-    }
-
-    if (started && winners.length >= CFG.FINAL_RESULTS_COUNT) {
-      status.textContent = `Top ${CFG.FINAL_RESULTS_COUNT} decided.`;
-      // keep running visually, but you could set started=false if you want to “freeze”
     }
   }
 
-  // =========================
-  // CANVAS LABELS (ALWAYS STUCK TO BALLS)
-  // =========================
-  function drawBallLabels_() {
+  // -------------------------
+  // Camera follow
+  // -------------------------
+  function followLeader_() {
+    if (!render || balls.length === 0) return;
+
+    let leader = balls[0];
+    for (const b of balls) {
+      if (b.position.y > leader.position.y) leader = b;
+    }
+
+    const bounds = render.bounds;
+    const viewW = bounds.max.x - bounds.min.x;
+    const viewH = bounds.max.y - bounds.min.y;
+
+    const desiredMinX = leader.position.x - viewW / 2;
+    const desiredMinY = leader.position.y - viewH / 2;
+
+    const desiredMaxX = desiredMinX + viewW;
+    const desiredMaxY = desiredMinY + viewH;
+
+    bounds.min.x += (desiredMinX - bounds.min.x) * CFG.FOLLOW_LERP;
+    bounds.min.y += (desiredMinY - bounds.min.y) * CFG.FOLLOW_LERP;
+    bounds.max.x += (desiredMaxX - bounds.max.x) * CFG.FOLLOW_LERP;
+    bounds.max.y += (desiredMaxY - bounds.max.y) * CFG.FOLLOW_LERP;
+  }
+
+  // -------------------------
+  // Flippers
+  // -------------------------
+  function buildFlippers_(w, h) {
+    const out = [];
+    const leftX = Math.round(w * 0.18);
+    const rightX = Math.round(w * 0.82);
+
+    const ys = [Math.round(h * 0.33), Math.round(h * 0.52), Math.round(h * 0.70)];
+
+    for (let i = 0; i < ys.length; i++) {
+      out.push(makeFlipper_(leftX, ys[i], +1));
+      out.push(makeFlipper_(rightX, ys[i], -1));
+    }
+    return out;
+
+    function makeFlipper_(x, y, dir) {
+      const body = Bodies.rectangle(x, y, CFG.FLIPPER_W, CFG.FLIPPER_H, {
+        isStatic: true,
+        angle: dir * 0.35,
+        render: { fillStyle: "rgba(90,110,150,0.32)" }
+      });
+
+      return {
+        body,
+        dir,
+        baseAngle: body.angle,
+        targetAngle: body.angle,
+        nextAt: performance.now() + rand_(CFG.FLIPPER_TWITCH_MIN, CFG.FLIPPER_TWITCH_MAX),
+        mode: "idle"
+      };
+    }
+  }
+
+  function twitchFlippers_() {
+    const now = performance.now();
+    for (const f of flippers) {
+      if (f.mode === "idle" && now >= f.nextAt) {
+        f.mode = "kick";
+        f.targetAngle = f.baseAngle + f.dir * CFG.FLIPPER_MAX_DELTA;
+      }
+
+      if (f.mode === "kick") {
+        Body.setAngularVelocity(f.body, f.dir * CFG.FLIPPER_KICK_ANGVEL);
+        if (Math.abs(f.body.angle - f.targetAngle) < 0.10) {
+          f.mode = "return";
+          f.targetAngle = f.baseAngle;
+        }
+      } else if (f.mode === "return") {
+        Body.setAngularVelocity(f.body, f.dir * CFG.FLIPPER_RETURN_ANGVEL);
+        if (Math.abs(f.body.angle - f.targetAngle) < 0.10) {
+          Body.setAngle(f.body, f.baseAngle);
+          Body.setAngularVelocity(f.body, 0);
+          f.mode = "idle";
+          f.nextAt = now + rand_(CFG.FLIPPER_TWITCH_MIN, CFG.FLIPPER_TWITCH_MAX);
+        }
+      }
+    }
+  }
+
+  // -------------------------
+  // Canvas labels (THIS fixes “numbers falling off”)
+  // -------------------------
+  function drawBallNumbers_() {
     if (!render) return;
 
     const ctx = render.context;
-    ctx.save();
-
     const bounds = render.bounds;
     const w = render.options.width;
     const h = render.options.height;
@@ -530,12 +539,13 @@
     const scaleX = w / (bounds.max.x - bounds.min.x);
     const scaleY = h / (bounds.max.y - bounds.min.y);
 
+    ctx.save();
     ctx.scale(scaleX, scaleY);
     ctx.translate(-bounds.min.x, -bounds.min.y);
 
     ctx.textAlign = "center";
     ctx.textBaseline = "middle";
-    ctx.font = "900 14px system-ui, -apple-system, Segoe UI, Roboto, Arial";
+    ctx.font = "bold 14px system-ui, -apple-system, Segoe UI, Roboto, Arial";
 
     for (const b of balls) {
       const meta = b.plugin && b.plugin.raffle;
@@ -545,10 +555,10 @@
       const y = b.position.y;
 
       ctx.lineWidth = 3;
-      ctx.strokeStyle = "rgba(0,0,0,0.60)";
+      ctx.strokeStyle = "rgba(0,0,0,0.55)";
       ctx.strokeText(String(meta.num), x, y);
 
-      ctx.fillStyle = "rgba(255,255,255,0.95)";
+      ctx.fillStyle = "rgba(255,255,255,0.92)";
       ctx.fillText(String(meta.num), x, y);
     }
 
@@ -570,129 +580,34 @@
     ctx.scale(scaleX, scaleY);
     ctx.translate(-bounds.min.x, -bounds.min.y);
 
-    // big visible bar
-    const barY = finishY - CFG.FINISH_BAR_H / 2;
-    ctx.fillStyle = CFG.FINISH_BAR_FILL;
-    ctx.strokeStyle = CFG.FINISH_BAR_STROKE;
+    ctx.strokeStyle = "rgba(255,255,255,0.10)";
     ctx.lineWidth = 2;
-
     ctx.beginPath();
-    ctx.rect(bounds.min.x, barY, (bounds.max.x - bounds.min.x), CFG.FINISH_BAR_H);
-    ctx.fill();
+    ctx.moveTo(bounds.min.x, finishY);
+    ctx.lineTo(bounds.max.x, finishY);
     ctx.stroke();
 
     ctx.restore();
   }
 
-  // =========================
-  // CAMERA FOLLOW
-  // =========================
-  function updateCameraFollow_() {
-    if (!render || balls.length === 0) return;
-
-    // leader = highest Y (lowest on screen)
-    let leader = balls[0];
-    for (const b of balls) if (b.position.y > leader.position.y) leader = b;
-
-    const bounds = render.bounds;
-    const viewW = bounds.max.x - bounds.min.x;
-    const viewH = bounds.max.y - bounds.min.y;
-
-    const targetMin = {
-      x: leader.position.x - viewW / 2,
-      y: leader.position.y - viewH / 2
-    };
-    const targetMax = {
-      x: targetMin.x + viewW,
-      y: targetMin.y + viewH
-    };
-
-    bounds.min.x += (targetMin.x - bounds.min.x) * CFG.CAMERA_LERP;
-    bounds.min.y += (targetMin.y - bounds.min.y) * CFG.CAMERA_LERP;
-    bounds.max.x += (targetMax.x - bounds.max.x) * CFG.CAMERA_LERP;
-    bounds.max.y += (targetMax.y - bounds.max.y) * CFG.CAMERA_LERP;
-  }
-
-  // =========================
-  // FLIPPERS
-  // =========================
-  function buildTwitchFlippers_(wW, wH) {
-    const out = [];
-    const leftX = Math.round(wW * 0.18);
-    const rightX = Math.round(wW * 0.82);
-
-    const ys = [
-      Math.round(wH * 0.33),
-      Math.round(wH * 0.52),
-      Math.round(wH * 0.70)
-    ];
-
-    for (let i = 0; i < CFG.FLIPPER_COUNT_PER_SIDE; i++) {
-      out.push(makeFlipper_(leftX, ys[i], +1));
-      out.push(makeFlipper_(rightX, ys[i], -1));
-    }
-    return out;
-
-    function makeFlipper_(x, y, dir) {
-      const body = Bodies.rectangle(x, y, CFG.FLIPPER_W, CFG.FLIPPER_H, {
-        isStatic: true,
-        angle: dir * 0.35,
-        render: { fillStyle: "rgba(90,110,150,0.32)" }
-      });
-
-      return {
-        body,
-        dir,
-        baseAngle: body.angle,
-        targetAngle: body.angle,
-        nextTwitchAt: performance.now() + rand_(CFG.FLIPPER_TWITCH_INTERVAL_MS_MIN, CFG.FLIPPER_TWITCH_INTERVAL_MS_MAX),
-        mode: "idle"
-      };
-    }
-  }
-
-  function twitchFlippers_() {
-    const now = performance.now();
-    for (const f of flippers) {
-      if (now >= f.nextTwitchAt && f.mode === "idle") {
-        f.mode = "kick";
-        f.targetAngle = clamp_(f.baseAngle + f.dir * CFG.FLIPPER_MAX_ANGLE, -Math.PI, Math.PI);
-      }
-
-      if (f.mode === "kick") {
-        Body.setAngularVelocity(f.body, f.dir * CFG.FLIPPER_KICK_ANGULAR_VEL);
-        if (Math.abs(f.body.angle - f.targetAngle) < 0.10) {
-          f.mode = "return";
-          f.targetAngle = f.baseAngle;
-        }
-      } else if (f.mode === "return") {
-        Body.setAngularVelocity(f.body, f.dir * CFG.FLIPPER_RETURN_ANGULAR_VEL);
-        if (Math.abs(f.body.angle - f.targetAngle) < 0.10) {
-          Body.setAngle(f.body, f.baseAngle);
-          Body.setAngularVelocity(f.body, 0);
-          f.mode = "idle";
-          f.nextTwitchAt = now + rand_(CFG.FLIPPER_TWITCH_INTERVAL_MS_MIN, CFG.FLIPPER_TWITCH_INTERVAL_MS_MAX);
-        }
-      }
-    }
-  }
-
-  // =========================
-  // RESIZE
-  // =========================
+  // -------------------------
+  // Resize
+  // -------------------------
   function onResize_() {
     if (!render) return;
     render.options.width = window.innerWidth;
     render.options.height = window.innerHeight;
-    render.canvas.width = window.innerWidth * (window.devicePixelRatio || 1);
-    render.canvas.height = window.innerHeight * (window.devicePixelRatio || 1);
+
+    const dpr = window.devicePixelRatio || 1;
+    render.canvas.width = window.innerWidth * dpr;
+    render.canvas.height = window.innerHeight * dpr;
     render.canvas.style.width = window.innerWidth + "px";
     render.canvas.style.height = window.innerHeight + "px";
   }
 
-  // =========================
-  // HELPERS
-  // =========================
+  // -------------------------
+  // Helpers
+  // -------------------------
   function pickColor_(i) {
     const palette = [
       "#63D471", "#FFD166", "#EF476F", "#06D6A0", "#118AB2",
@@ -700,37 +615,40 @@
     ];
     return palette[i % palette.length];
   }
-  function rand_(min, max) { return min + Math.random() * (max - min); }
-  function clamp_(v, a, b) { return Math.max(a, Math.min(b, v)); }
-  function ordinal_(n) {
-    if (n === 1) return "1st";
-    if (n === 2) return "2nd";
-    if (n === 3) return "3rd";
-    return `${n}th`;
+
+  function rand_(min, max) {
+    return min + Math.random() * (max - min);
   }
 
-  // =========================
-  // BUTTONS
-  // =========================
-  btnBuild.addEventListener("click", () => {
-    try { buildWorld(); } catch (e) { status.textContent = "Build failed: " + (e && e.message ? e.message : String(e)); }
-  });
+  // -------------------------
+  // Wire your existing buttons (THIS is the key)
+  // -------------------------
+  function wireUI_() {
+    if (UI.btnBuild) UI.btnBuild.addEventListener("click", buildCourse_);
+    if (UI.btnStart) UI.btnStart.addEventListener("click", start_);
+    if (UI.btnReset) UI.btnReset.addEventListener("click", reset_);
+    if (UI.btnShake) UI.btnShake.addEventListener("click", shake_);
 
-  btnStart.addEventListener("click", () => {
-    try { startRace(); } catch (e) { status.textContent = "Start failed: " + (e && e.message ? e.message : String(e)); }
-  });
+    // If any are missing, log it so you can fix ids fast
+    const missing = [];
+    if (!UI.btnBuild) missing.push("Build Course");
+    if (!UI.btnStart) missing.push("Start");
+    if (!UI.btnReset) missing.push("Reset");
+    if (!UI.btnShake) missing.push("Shake");
+    if (missing.length) {
+      console.warn("Could not find buttons:", missing.join(", "));
+      console.warn("Tip: add ids like #btnBuild #btnStart #btnReset #btnShake and reload.");
+    }
+  }
 
-  btnReset.addEventListener("click", () => {
-    try { resetAll(); } catch (e) { status.textContent = "Reset failed: " + (e && e.message ? e.message : String(e)); }
-  });
+  // -------------------------
+  // INIT (NO auto start)
+  // -------------------------
+  wireUI_();
+  ensureScoreboardUI_();
 
-  btnShake.addEventListener("click", () => {
-    try { shake(); } catch (e) { status.textContent = "Shake failed: " + (e && e.message ? e.message : String(e)); }
-  });
+  // Do NOT auto-build. You press Build Course.
+  // If you want auto-build only when names exist, uncomment:
+  // if (UI.namesInput && UI.namesInput.value.trim()) buildCourse_();
 
-  // =========================
-  // INIT (do NOT auto-start)
-  // =========================
-  cleanupLegacyLabels_();
-  status.textContent = "Paste names → Build Course → Start";
 })();
